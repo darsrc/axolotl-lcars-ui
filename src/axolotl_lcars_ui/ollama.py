@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -22,6 +24,9 @@ class OllamaModel:
     compatible: bool = False
     compatible_path: str = ""
     reason: str = ""
+    hf_hint: str = ""
+    hf_query: str = ""
+    next_step: str = ""
 
 
 class OllamaManager:
@@ -73,17 +78,18 @@ class OllamaManager:
         if not self.models and not self.last_error:
             self.refresh()
         if self.last_error:
-            return [{"Model": "Ollama unavailable", "Family": "", "Size": "", "Axolotl": self.last_error}]
+            return [{"Model": "Ollama unavailable", "Params": "", "Quant": "", "Size": "", "HF Search": "", "Axolotl": self.last_error}]
         if not self.models:
-            return [{"Model": "No local Ollama models", "Family": "", "Size": "", "Axolotl": ""}]
+            return [{"Model": "No local Ollama models", "Params": "", "Quant": "", "Size": "", "HF Search": "", "Axolotl": ""}]
         return [
             {
                 "Model": model.name,
-                "Family": model.family,
                 "Params": model.parameter_size,
                 "Quant": model.quantization,
                 "Size": _format_bytes(model.size),
-                "Axolotl": "readable" if model.compatible else model.reason,
+                "Source": model.hf_hint or model.from_ref[:56],
+                "HF Search": model.hf_query,
+                "Axolotl": "readable" if model.compatible else model.next_step,
             }
             for model in self.models
         ]
@@ -93,13 +99,18 @@ class OllamaManager:
             payload = self._json("POST", "/api/show", {"model": model.name})
         except OSError as exc:
             model.reason = f"show failed: {exc}"
+            model.hf_query = _hf_search_query(model)
+            _set_next_step(model)
             return
         modelfile = str(payload.get("modelfile") or "")
         model.from_ref = _from_line(modelfile)
+        model.hf_hint = _hf_reference(model.from_ref)
+        model.hf_query = _hf_search_query(model)
         info = payload.get("model_info") or {}
         if not model.format:
             model.format = str(info.get("general.file_type") or "")
         _mark_compatibility(model)
+        _set_next_step(model)
 
     def _json(self, method: str, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -148,6 +159,58 @@ def _mark_compatibility(model: OllamaModel) -> None:
         model.reason = "Ollama quantized/GGUF store is not an Axolotl base_model path"
         return
     model.reason = "No local Transformers/safetensors source path exposed"
+
+
+def _set_next_step(model: OllamaModel) -> None:
+    if model.compatible:
+        model.next_step = "Use compatible local source"
+        return
+    if model.hf_hint:
+        model.next_step = "Search HF for source/fine-tunes; avoid GGUF-only files"
+        return
+    if model.hf_query:
+        model.next_step = "Search HF for matching Transformers/safetensors repo"
+        return
+    model.next_step = model.reason or "No Axolotl-readable source detected"
+
+
+def _hf_reference(source: str) -> str:
+    clean = source.strip().strip('"')
+    if not clean:
+        return ""
+    if clean.startswith("hf.co/"):
+        clean = "https://" + clean
+    if clean.startswith("huggingface.co/"):
+        clean = "https://" + clean
+    if clean.startswith(("http://", "https://")):
+        parsed = urlparse(clean)
+        if parsed.netloc not in {"hf.co", "huggingface.co", "www.huggingface.co"}:
+            return ""
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 2:
+            return "/".join(parts[:2]).split(":", 1)[0]
+        return ""
+    match = re.match(r"^([A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*)(?::[^/\s]+)?$", clean)
+    return match.group(1) if match else ""
+
+
+def _hf_search_query(model: OllamaModel) -> str:
+    if model.hf_hint:
+        repo = model.hf_hint
+        name = repo.split("/", 1)[1]
+        return _strip_runtime_quant_terms(name) or repo
+    name = model.name.split(":", 1)[0]
+    pieces = [name, model.family, model.parameter_size]
+    query = " ".join(piece for piece in pieces if piece).strip()
+    return _strip_runtime_quant_terms(query)
+
+
+def _strip_runtime_quant_terms(value: str) -> str:
+    text = re.sub(r"(?i)\bq[2-8](?:[-_\s][a-z0-9]+)*\b", " ", value)
+    text = re.sub(r"(?i)\b(gguf|exl2|gptq|awq)\b", " ", text)
+    text = re.sub(r"(?i)\b(4bit|8bit|int4|int8|quantized|ollama)\b", " ", text)
+    text = re.sub(r"[-_]+", " ", text)
+    return " ".join(text.split())
 
 
 def _is_transformers_model_dir(path: Path) -> bool:

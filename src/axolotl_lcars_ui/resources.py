@@ -205,6 +205,117 @@ def gpu_rows(gpus: list[GpuInfo]) -> list[dict[str, str]]:
     return rows
 
 
+def process_rows(limit: int = 10) -> list[dict[str, str]]:
+    """Return top local processes by resident memory, with sanitized command names."""
+
+    rows = []
+    for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status", "cmdline"]):
+        try:
+            info = proc.info
+            memory = info.get("memory_info")
+            rss = int(getattr(memory, "rss", 0) or 0)
+            cpu = float(info.get("cpu_percent") or 0.0)
+            rows.append(
+                {
+                    "PID": str(info.get("pid") or ""),
+                    "Process": _safe_process_name(info.get("name"), info.get("cmdline")),
+                    "RAM": format_bytes(rss),
+                    "CPU": f"{cpu:.0f}%",
+                    "State": str(info.get("status") or ""),
+                    "_rss": str(rss),
+                    "_cpu": str(cpu),
+                }
+            )
+        except (OSError, psutil.Error):
+            continue
+    rows.sort(key=lambda row: (int(row.pop("_rss")), float(row.pop("_cpu"))), reverse=True)
+    return rows[:limit] or [{"PID": "", "Process": "No process data available", "RAM": "", "CPU": "", "State": ""}]
+
+
+def gpu_process_rows(limit: int = 10) -> list[dict[str, str]]:
+    if shutil.which("nvidia-smi") is None:
+        return [{"PID": "", "GPU": "nvidia-smi unavailable", "Process": "", "VRAM": ""}]
+    command = [
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [{"PID": "", "GPU": "GPU process query failed", "Process": "", "VRAM": ""}]
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return [{"PID": "", "GPU": "No active GPU compute processes", "Process": "", "VRAM": ""}]
+    rows = []
+    for line in completed.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 4:
+            continue
+        try:
+            used = int(float(parts[3]) * 1024 * 1024)
+        except ValueError:
+            used = 0
+        rows.append(
+            {
+                "PID": parts[1],
+                "GPU": parts[0][-12:],
+                "Process": Path(parts[2]).name or parts[2],
+                "VRAM": format_bytes(used),
+            }
+        )
+    rows.sort(key=lambda row: _parse_size(row["VRAM"]), reverse=True)
+    return rows[:limit] or [{"PID": "", "GPU": "No active GPU compute processes", "Process": "", "VRAM": ""}]
+
+
+def storage_hotspot_rows(
+    project_root: Path,
+    *,
+    output_dir: str = "",
+    prepared_path: str = "",
+) -> list[dict[str, str]]:
+    candidates: list[tuple[str, Path, str]] = []
+    if output_dir:
+        candidates.append(("Axolotl output_dir", _resolve_user_path(project_root, output_dir), "training outputs"))
+    if prepared_path:
+        candidates.append(("Prepared dataset cache", _resolve_user_path(project_root, prepared_path), "dataset preprocessing"))
+    candidates.extend(
+        [
+            ("Outputs root", project_root / "outputs", "training outputs"),
+            ("Default prepared cache", project_root / "last_run_prepared", "dataset preprocessing"),
+            ("Config files", project_root / "configs", "local yaml configs"),
+        ]
+    )
+    hf_cache = _hf_cache_path()
+    if hf_cache is not None:
+        candidates.append(("Hugging Face cache", hf_cache, "downloaded models/datasets"))
+
+    rows = []
+    seen: set[Path] = set()
+    for label, path, role in candidates:
+        resolved = path.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        size = directory_size(resolved)
+        rows.append(
+            {
+                "Area": label,
+                "Size": format_bytes(size),
+                "Role": role,
+                "Path": _display_path(resolved, project_root),
+                "_bytes": str(size),
+            }
+        )
+    rows.sort(key=lambda row: int(row.pop("_bytes")), reverse=True)
+    return rows or [{"Area": "No monitored artifact paths", "Size": "", "Role": "", "Path": ""}]
+
+
 def _optional_float(value: str) -> float | None:
     value = value.strip()
     if value in {"", "N/A", "[Not Supported]"}:
@@ -226,3 +337,44 @@ def directory_size(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _safe_process_name(name: object, cmdline: object) -> str:
+    if isinstance(name, str) and name:
+        return name[:48]
+    if isinstance(cmdline, list) and cmdline:
+        return Path(str(cmdline[0])).name[:48]
+    return "unknown"
+
+
+def _parse_size(value: str) -> float:
+    match = value.strip().upper()
+    factors = {"TB": 1024**4, "GB": 1024**3, "MB": 1024**2, "KB": 1024, "B": 1}
+    for unit, factor in factors.items():
+        if match.endswith(unit):
+            try:
+                return float(match[: -len(unit)]) * factor
+            except ValueError:
+                return 0.0
+    return 0.0
+
+
+def _resolve_user_path(project_root: Path, value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else project_root / path
+
+
+def _display_path(path: Path, project_root: Path) -> str:
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return str(path)
+
+
+def _hf_cache_path() -> Path | None:
+    try:
+        from huggingface_hub import constants
+    except Exception:
+        return None
+    cache_home = getattr(constants, "HF_HUB_CACHE", None)
+    return Path(cache_home).expanduser() if cache_home else None

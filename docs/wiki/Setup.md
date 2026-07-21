@@ -39,6 +39,15 @@ The UI can edit configs and manage content without Axolotl installed, but run la
 
 Install Axolotl according to the official docs for your CUDA/ROCm/Mac environment, then restart the UI.
 
+## Setup Page
+
+The Setup page separates starter choices from raw Axolotl fields:
+
+- Smart Setup recipes apply coherent LoRA, QLoRA, chat-template, or local-completion starter values.
+- Model and dataset presets fill the required `base_model` and `datasets[0].path` fields.
+- The defaults table distinguishes Axolotl upstream defaults from this UI's starter suggestions.
+- Required setup fields are labeled as required; optional fields are omitted from YAML when left unset.
+
 ## LCARS WebUI
 
 This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs it
@@ -52,6 +61,8 @@ uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 ## Hugging Face
 
 Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading private repos or pushing prepared datasets/models.
+
+The HF Hub page inspects model and dataset repositories before use. Model downloads are filtered to Axolotl-relevant config/tokenizer/support files plus `.safetensors`, `.bin`, and `.pt` weights. Dataset downloads are filtered to JSON, JSONL, Parquet, CSV, Arrow, and text-style files.
 
 ## Tracking Integrations
 

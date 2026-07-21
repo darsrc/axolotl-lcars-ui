@@ -115,6 +115,30 @@ CHAT_TEMPLATE_OPTIONS = (
     "jinja",
 )
 
+DATASET_TYPE_OPTIONS = (
+    "",
+    "alpaca",
+    "completion",
+    "chat_template",
+    "sharegpt",
+    "pretrain",
+    "stepwise_supervised",
+    "bradley_terry",
+    "dpo",
+    "kto",
+    "rl",
+)
+
+DATASET_FILE_TYPE_OPTIONS = (
+    "",
+    "json",
+    "jsonl",
+    "parquet",
+    "csv",
+    "arrow",
+    "text",
+)
+
 
 def _widget_id_for(key: str) -> str:
     return "cfg-adv-" + key.replace("_", "-").replace(".", "-")
@@ -185,11 +209,11 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("trust_remote_code", "Trust Remote Code", "tri_bool", "cfg-trust-remote-code", "Model", optional=True),
     FieldSpec("processor_type", "Processor Type", "text", "cfg-processor-type", "Model", "AutoProcessor or model-specific processor", optional=True),
     FieldSpec("datasets.0.path", "Dataset Path", "text", "cfg-dataset-path", "Dataset", "HF dataset repo id or local path"),
-    FieldSpec("datasets.0.type", "Dataset Type", "text", "cfg-dataset-type", "Dataset", "alpaca, completion, chat_template, sharegpt, ...", default="alpaca"),
+    FieldSpec("datasets.0.type", "Dataset Type", "select", "cfg-dataset-type", "Dataset", options=DATASET_TYPE_OPTIONS, default="alpaca"),
     FieldSpec("datasets.0.split", "Dataset Split", "text", "cfg-dataset-split", "Dataset", "train", optional=True),
     FieldSpec("datasets.0.name", "Dataset Config Name", "text", "cfg-dataset-name", "Dataset", "optional HF dataset subset/config", optional=True),
     FieldSpec("datasets.0.data_files", "Dataset Data Files", "csv_list", "cfg-dataset-data-files", "Dataset", "file1.jsonl, file2.jsonl", optional=True),
-    FieldSpec("datasets.0.ds_type", "Local File Type", "text", "cfg-dataset-ds-type", "Dataset", "json, jsonl, parquet, csv", optional=True),
+    FieldSpec("datasets.0.ds_type", "Local File Type", "select", "cfg-dataset-ds-type", "Dataset", options=DATASET_FILE_TYPE_OPTIONS, optional=True),
     FieldSpec("datasets.0.field", "Completion Text Field", "text", "cfg-dataset-field", "Dataset", "text", optional=True),
     FieldSpec("datasets.0.field_messages", "Messages Field", "text", "cfg-dataset-field-messages", "Dataset", "messages", optional=True),
     FieldSpec("datasets.0.chat_template", "Dataset Chat Template", "select", "cfg-dataset-chat-template", "Dataset", options=CHAT_TEMPLATE_OPTIONS, optional=True),
@@ -809,6 +833,17 @@ class ConfigStore:
             datasets[0] = {}
         datasets[0]["path"] = dataset_ref
         datasets[0].setdefault("type", dataset_type or "alpaca")
+        self.save(cfg)
+
+    def apply_updates(self, updates: dict[str, Any]) -> None:
+        cfg = self.load()
+        specs_by_key = {spec.key: spec for spec in FIELD_SPECS}
+        for key, value in updates.items():
+            spec = specs_by_key.get(key)
+            if spec is None:
+                self._set_path(cfg, key, value, optional=value in (None, ""))
+            else:
+                self._set_path(cfg, key, self._coerce(spec, value), optional=spec.optional)
         self.save(cfg)
 
     def summary_rows(self) -> list[dict[str, str]]:

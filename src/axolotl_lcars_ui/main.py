@@ -17,9 +17,25 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigError, ConfigStore, FieldSpec
-from axolotl_lcars_ui.hf_manager import HuggingFaceManager, cache_summary_text, search_rows
+from axolotl_lcars_ui.hf_manager import (
+    HuggingFaceManager,
+    cache_summary_text,
+    detail_file_rows,
+    detail_summary_rows,
+    related_rows,
+    result_options,
+    search_rows,
+)
 from axolotl_lcars_ui.ollama import OllamaManager
-from axolotl_lcars_ui.resources import TelemetrySampler, disk_rows, format_bytes, gpu_rows
+from axolotl_lcars_ui.resources import (
+    TelemetrySampler,
+    disk_rows,
+    format_bytes,
+    gpu_process_rows,
+    gpu_rows,
+    process_rows,
+    storage_hotspot_rows,
+)
 from axolotl_lcars_ui.runner import AXOLOTL_ACTIONS, CONFIG_ACTIONS, LAUNCHER_ACTIONS, AxolotlRunner
 from axolotl_lcars_ui.validator import AxolotlPreflight, PreflightIssue, issue_rows
 
@@ -64,6 +80,121 @@ CONFIG_GROUP_NOTES = {
     "RL / Evaluation": "TRL/RL modes, vLLM knobs, reward-model flags, and lm-eval settings.",
 }
 
+SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
+HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
+HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
+HF_LIMIT_OPTIONS = ["12", "25", "50"]
+SETUP_FIELD_KEYS = {
+    "strict",
+    "resume_from_checkpoint",
+    "auto_resume_from_checkpoints",
+    "save_only_model",
+    "base_model",
+    "revision_of_model",
+    "base_model_config",
+    "base_model_ignore_patterns",
+    "tokenizer_config",
+    "model_type",
+    "tokenizer_type",
+    "trust_remote_code",
+    "datasets.0.path",
+    "datasets.0.type",
+    "datasets.0.split",
+    "datasets.0.name",
+    "datasets.0.data_files",
+    "datasets.0.ds_type",
+    "datasets.0.field",
+    "datasets.0.field_messages",
+    "datasets.0.chat_template",
+    "datasets.0.chat_template_jinja",
+    "datasets.0.train_on_eos",
+    "dataset_prepared_path",
+    "val_set_size",
+    "streaming",
+    "dataset_processes",
+    "dataset_num_proc",
+    "sequence_len",
+    "eval_sequence_len",
+    "excess_length_strategy",
+    "max_prompt_len",
+    "sample_packing",
+    "eval_sample_packing",
+    "pad_to_sequence_len",
+    "pad_to_multiple_of",
+}
+
+MODEL_PRESETS = [
+    "NousResearch/Llama-3.2-1B",
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    "google/gemma-2-2b",
+    "mistralai/Mistral-7B-v0.1",
+]
+
+DATASET_PRESETS = {
+    "teknium/GPT4-LLM-Cleaned | alpaca": ("teknium/GPT4-LLM-Cleaned", "alpaca"),
+    "tatsu-lab/alpaca | alpaca": ("tatsu-lab/alpaca", "alpaca"),
+    "HuggingFaceH4/ultrachat_200k | chat_template": ("HuggingFaceH4/ultrachat_200k", "chat_template"),
+    "./data/train.jsonl | completion": ("./data/train.jsonl", "completion"),
+}
+
+SETUP_RECIPES: dict[str, dict[str, Any]] = {
+    "LoRA SFT starter": {
+        "adapter": "lora",
+        "load_in_8bit": True,
+        "load_in_4bit": False,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "sequence_len": 2048,
+        "sample_packing": True,
+        "pad_to_sequence_len": True,
+        "micro_batch_size": 2,
+        "gradient_accumulation_steps": 4,
+        "num_epochs": 3,
+        "learning_rate": 0.0001,
+        "optimizer": "adamw_bnb_8bit",
+        "lr_scheduler": "cosine",
+        "bf16": "auto",
+        "fp16": False,
+        "gradient_checkpointing": "true",
+        "strict": False,
+    },
+    "QLoRA 4-bit starter": {
+        "adapter": "qlora",
+        "load_in_8bit": False,
+        "load_in_4bit": True,
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "sequence_len": 2048,
+        "sample_packing": True,
+        "pad_to_sequence_len": True,
+        "micro_batch_size": 1,
+        "gradient_accumulation_steps": 8,
+        "learning_rate": 0.0002,
+        "optimizer": "paged_adamw_8bit",
+        "bf16": "auto",
+        "gradient_checkpointing": "true",
+        "strict": False,
+    },
+    "Chat template SFT": {
+        "datasets.0.type": "chat_template",
+        "datasets.0.field_messages": "messages",
+        "datasets.0.chat_template": "tokenizer_default",
+        "datasets.0.train_on_eos": "turn",
+        "sample_packing": True,
+        "pad_to_sequence_len": True,
+    },
+    "Local completion JSONL": {
+        "datasets.0.path": "./data/train.jsonl",
+        "datasets.0.type": "completion",
+        "datasets.0.ds_type": "json",
+        "datasets.0.field": "text",
+        "datasets.0.split": "train",
+        "sample_packing": True,
+    },
+}
+
 
 @dataclass
 class AppState:
@@ -74,6 +205,7 @@ class AppState:
     runner: AxolotlRunner
     preflight: AxolotlPreflight
     preflight_issues: list[PreflightIssue] = field(default_factory=list)
+    resource_tick: int = 0
 
     def refresh_preflight(self) -> list[PreflightIssue]:
         try:
@@ -129,6 +261,7 @@ def build_ui() -> None:
     lcars.nav("Train", page="config-train", color="tanoi")
     lcars.nav("Hardware", page="config-hardware", color="anakiwa")
     lcars.nav("Tracking", page="config-tracking", color="lilac")
+    lcars.nav("Advanced", page="config-advanced", color="blue-bell")
     lcars.nav("Run", page="run", color="red")
     lcars.nav("Resources", page="resources", color="anakiwa")
     lcars.nav("HF Hub", page="hub", color="lilac")
@@ -141,6 +274,7 @@ def build_ui() -> None:
     _config_train_page()
     _config_hardware_page()
     _config_tracking_page()
+    _config_advanced_page()
     _run_page()
     _resources_page()
     _hub_page()
@@ -219,9 +353,19 @@ def _config_page() -> None:
 
 
 def _config_setup_page() -> None:
-    with lcars.page("Setup", id="config-setup", layout="grid"):
-        with lcars.padd("Setup / Model / Data", color="pale-canary"):
-            _render_config_fields({"Run Safety", "Model", "Dataset", "Sequence / Packing"})
+    with lcars.page("Setup", id="config-setup", layout="console"):
+        with lcars.console("Setup Workflow", color="pale-canary"):
+            _setup_smart_panel()
+            with lcars.data_panel("Defaults / Examples", color="blue-bell"):
+                lcars.table(_setup_default_rows(), title="Axolotl Defaults And Starters", id="setup-defaults-table")
+            for group, color in (
+                ("Model", "pale-canary"),
+                ("Dataset", "golden-tanoi"),
+                ("Sequence / Packing", "anakiwa"),
+                ("Run Safety", "lilac"),
+            ):
+                with lcars.data_panel(f"{group} Essentials", color=color):
+                    _render_config_fields({group}, keys=SETUP_FIELD_KEYS, include_headers=False)
             _config_page_actions("setup")
 
 
@@ -244,6 +388,20 @@ def _config_tracking_page() -> None:
         with lcars.padd("Tracking / Integrations / RL", color="lilac"):
             _render_config_fields({"Tracking", "Integrations", "RL / Evaluation"})
             _config_page_actions("tracking")
+
+
+def _config_advanced_page() -> None:
+    with lcars.page("Advanced", id="config-advanced", layout="console"):
+        with lcars.console("Advanced Structured Axolotl Surface", color="blue-bell"):
+            with lcars.padd("Advanced Setup Fields", color="blue-bell"):
+                advanced_groups = {"Run Safety", "Model", "Dataset", "Sequence / Packing"}
+                advanced_keys = {
+                    spec.key
+                    for spec in FIELD_SPECS
+                    if spec.group in advanced_groups and spec.key not in SETUP_FIELD_KEYS
+                }
+                _render_config_fields(keys=advanced_keys, id_prefix="advanced")
+                _config_page_actions("advanced")
 
 
 def _run_page() -> None:
@@ -279,6 +437,7 @@ def _run_page() -> None:
 def _resources_page() -> None:
     with lcars.page("Resources", id="resources", layout="telemetry"):
         snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
+        cfg = _load_config_or_empty()
         with lcars.diagnostic("System Telemetry", color="anakiwa"):
             lcars.gauge("CPU Load", snapshot.cpu_percent, unit="%", warn_threshold=80, crit_threshold=92, id="cpu-gauge")
             lcars.gauge("Memory Load", snapshot.ram_percent, unit="%", warn_threshold=80, crit_threshold=92, id="ram-gauge")
@@ -291,7 +450,10 @@ def _resources_page() -> None:
             )
             lcars.chart(STATE.telemetry.chart_payload(), title="Resource Trend", color="anakiwa", id="resource-chart")
             lcars.table(gpu_rows(snapshot.gpus), title="GPU Telemetry", id="gpu-table")
+            lcars.table(process_rows(), title="Top RAM / CPU Processes", id="process-table")
+            lcars.table(gpu_process_rows(), title="GPU Processes", id="gpu-process-table")
             lcars.table(disk_rows(snapshot.disks), title="Mounted Disks", id="disk-table")
+            lcars.table(_storage_rows(cfg), title="Storage Hotspots", id="storage-hotspot-table")
 
 
 def _hub_page() -> None:
@@ -301,13 +463,29 @@ def _hub_page() -> None:
                 _seed_text("hf-query", "llama instruct")
                 query = lcars.text_input("Search", placeholder="model or dataset query", autocomplete=False, id="hf-query")
                 repo_type = lcars.select("Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="hf-repo-type")
+                sort = lcars.select("Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
+                compatibility = lcars.select("Browse Filter", HF_COMPATIBILITY_OPTIONS, value=HF_COMPATIBILITY_OPTIONS[0], id="hf-compatibility")
+                limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
+                hf_options = result_options(STATE.hf.search_results)
+                result_choice = lcars.select(
+                    "Search Result",
+                    hf_options,
+                    value=STATE.hf.last_repo_id if STATE.hf.last_repo_id in hf_options else "",
+                    id="hf-result-select",
+                )
                 _seed_text("hf-repo-id", STATE.hf.last_repo_id)
-                repo_id = lcars.text_input("Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
+                repo_id = lcars.text_input("Selected Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
                 _seed_text("hf-revision", "")
                 revision = lcars.text_input("Revision", placeholder="optional branch/tag/commit", autocomplete=False, id="hf-revision")
                 if lcars.button("Search HF", color="anakiwa", id="hf-search"):
-                    _hf_search_action(query, repo_type)
-                if lcars.button("Download Repo", color="golden-tanoi", id="hf-download"):
+                    _hf_search_action(query, repo_type, sort=sort, compatibility=compatibility, limit=limit)
+                if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
+                    _hf_select_result_action(result_choice, revision)
+                if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
+                    _hf_inspect_action(repo_id, repo_type, revision)
+                if lcars.button("Find Fine-Tunes", color="lilac", id="hf-related"):
+                    _hf_related_action(repo_id)
+                if lcars.button("Download Selected", color="golden-tanoi", id="hf-download"):
                     _hf_download_action(repo_id, repo_type, revision)
                 if lcars.button("Use Repo In Config", color="tanoi", id="hf-use-repo"):
                     _hf_use_repo_action(repo_id, repo_type)
@@ -316,6 +494,9 @@ def _hub_page() -> None:
 
             with lcars.data_panel("Search Results", color="lilac"):
                 lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
+                lcars.table(detail_summary_rows(STATE.hf.selected_details), title="Selected Repo", id="hf-detail-table")
+                lcars.table(detail_file_rows(STATE.hf.selected_details), title="Compatible Files", id="hf-files-table")
+                lcars.table(related_rows(STATE.hf.related_results), title="Fine-Tunes / Related", id="hf-related-table")
                 lcars.table(STATE.hf.job_rows(), title="Download Jobs", id="hf-jobs-table")
                 lcars.log(LOG_HF, max_lines=300, title="HF Activity")
 
@@ -340,21 +521,84 @@ def _content_page() -> None:
 def _ollama_page() -> None:
     with lcars.page("Ollama", id="ollama", layout="grid"):
         with lcars.padd("Ollama Detection", color="pale-canary"):
-            lcars.alert(
-                "Ollama GGUF models are runtime artifacts. Axolotl needs a Hugging Face model id or local Transformers/safetensors directory.",
-                level="yellow",
-                id="ollama-format-alert",
-            )
+            lcars.table(_ollama_rule_rows(), title="Axolotl Source Gate", id="ollama-rule-table")
             lcars.table(STATE.ollama.rows(), title="Local Ollama Models", id="ollama-table")
             _seed_text("ollama-model-name", STATE.ollama.models[0].name if STATE.ollama.models else "")
             model_name = lcars.text_input("Ollama Model Name", placeholder="name:tag", autocomplete=False, id="ollama-model-name")
             if lcars.button("Refresh Ollama", color="anakiwa", id="ollama-refresh"):
                 _ollama_refresh_action()
+            if lcars.button("Search HF Source", color="lilac", id="ollama-search-hf"):
+                _ollama_search_hf_action(model_name)
             if lcars.button("Use Compatible Source", color="tanoi", id="ollama-use-source"):
                 _ollama_use_source_action(model_name)
 
 
-def _render_config_fields(groups: set[str] | None = None) -> dict[str, Any]:
+def _setup_smart_panel() -> None:
+    with lcars.control_panel("Smart Setup", color="pale-canary", zone="primary"):
+        recipe = lcars.select("Recipe", list(SETUP_RECIPES), value="LoRA SFT starter", id="setup-recipe")
+        model = lcars.select("Model Preset", MODEL_PRESETS, value=MODEL_PRESETS[0], id="setup-model-preset")
+        dataset = lcars.select("Dataset Preset", list(DATASET_PRESETS), value=next(iter(DATASET_PRESETS)), id="setup-dataset-preset")
+        if lcars.button("Apply Recipe", color="tanoi", id="setup-apply-recipe"):
+            _setup_apply_recipe_action(recipe)
+        if lcars.button("Apply Model", color="anakiwa", id="setup-apply-model"):
+            _setup_apply_model_action(model)
+        if lcars.button("Apply Dataset", color="golden-tanoi", id="setup-apply-dataset"):
+            _setup_apply_dataset_action(dataset)
+        if lcars.button("Use HF Selection", color="lilac", id="setup-use-hf"):
+            _hf_use_repo_action(STATE.hf.last_repo_id, STATE.hf.last_repo_type)
+        if lcars.button("Search Model Preset", color="blue-bell", id="setup-search-model"):
+            _hf_search_action(model, "model", sort="downloads", compatibility=HF_COMPATIBILITY_OPTIONS[0], limit="12")
+
+
+def _setup_default_rows() -> list[dict[str, str]]:
+    cfg = _load_config_or_empty()
+    specs = [
+        ("base_model", "Required", "None", "NousResearch/Llama-3.2-1B", "HF model id or local Transformers directory"),
+        ("datasets.0.path", "Required", "None", "teknium/GPT4-LLM-Cleaned", "HF dataset id, local file, or local directory"),
+        ("datasets.0.type", "Recommended", "None", "alpaca", "Axolotl formatter strategy"),
+        ("datasets.0.ds_type", "Optional", "Infer local file extension", "json", "Only needed for local files/directories"),
+        ("sequence_len", "Required for most runs", "None", "2048", "Context length used for tokenization/training"),
+        ("sample_packing", "Optional", "Unset unless configured", "true", "Packs multiple samples into one sequence"),
+        ("val_set_size", "Optional", "Unset", "0.1", "Validation split fraction or count"),
+        ("load_in_8bit", "Optional", "false", "true", "Lower VRAM LoRA starter mode"),
+        ("load_in_4bit", "Optional", "false", "false", "QLoRA starter switches this on"),
+        ("output_dir", "Optional", "./model-out", "./outputs/lora-out", "Training output path"),
+        ("strict", "Optional", "false", "false", "CLI override safety behavior"),
+    ]
+    return [
+        {
+            "Field": key,
+            "Current": str(_config_path_value(cfg, key) or ""),
+            "Need": need,
+            "Axolotl Default": axolotl_default,
+            "UI Starter": starter,
+            "Role": role,
+        }
+        for key, need, axolotl_default, starter, role in specs
+    ]
+
+
+def _storage_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    output_dir = str(cfg.get("output_dir") or "")
+    prepared_path = str(cfg.get("dataset_prepared_path") or "")
+    return storage_hotspot_rows(PROJECT_ROOT, output_dir=output_dir, prepared_path=prepared_path)
+
+
+def _ollama_rule_rows() -> list[dict[str, str]]:
+    return [
+        {"Source": "Local Transformers dir", "Action": "Apply", "Reason": "config/tokenizer/weights can be read by Axolotl"},
+        {"Source": "hf.co / model name", "Action": "Search HF", "Reason": "find original safetensors repo or compatible fine-tune"},
+        {"Source": "GGUF/internal blob", "Action": "Block", "Reason": "runtime artifact, not an Axolotl base_model"},
+    ]
+
+
+def _render_config_fields(
+    groups: set[str] | None = None,
+    *,
+    keys: set[str] | None = None,
+    include_headers: bool = True,
+    id_prefix: str = "",
+) -> dict[str, Any]:
     values: dict[str, Any] = {}
     current_group = ""
     cfg = _load_config_or_empty()
@@ -369,40 +613,45 @@ def _render_config_fields(groups: set[str] | None = None) -> dict[str, Any]:
     for _, spec in ordered_specs:
         if spec.group not in group_filter:
             continue
+        if keys is not None and spec.key not in keys:
+            continue
         if spec.group != current_group:
             current_group = spec.group
-            safe_group_id = current_group.lower().replace(" ", "-").replace("/", "")
-            lcars.header(current_group, size="h3", color="pale-canary", id=f"hdr-{safe_group_id}")
-            note = CONFIG_GROUP_NOTES.get(current_group)
-            if note:
-                lcars.text(note, id=f"note-{safe_group_id}")
+            if include_headers:
+                safe_group_id = current_group.lower().replace(" ", "-").replace("/", "")
+                prefix = f"{id_prefix}-" if id_prefix else ""
+                lcars.header(current_group, size="h3", color="pale-canary", id=f"hdr-{prefix}{safe_group_id}")
+                note = CONFIG_GROUP_NOTES.get(current_group)
+                if note:
+                    lcars.text(note, id=f"note-{prefix}{safe_group_id}")
         values[spec.widget_id] = _render_field(spec, cfg)
     return values
 
 
 def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
     value = STATE.config_store.field_value(spec, cfg)
+    label = _field_label(spec)
     if spec.kind in {"text", "csv_list", "json"}:
         _seed_text(spec.widget_id, str(value or ""))
         if spec.kind == "json":
             return lcars.text_input(
-                spec.label,
+                label,
                 placeholder=spec.placeholder or "{key: value}",
                 autocomplete=False,
                 id=spec.widget_id,
             )
-        return lcars.text_input(spec.label, placeholder=spec.placeholder, autocomplete=False, id=spec.widget_id)
+        return lcars.text_input(label, placeholder=spec.placeholder, autocomplete=False, id=spec.widget_id)
     if spec.kind == "number":
         if spec.optional:
             _seed_text(spec.widget_id, "" if value in (None, "") else str(value))
             return lcars.text_input(
-                spec.label,
+                label,
                 placeholder=spec.placeholder or "unset",
                 autocomplete=False,
                 id=spec.widget_id,
             )
         return lcars.number_input(
-            spec.label,
+            label,
             value=float(value if value not in ("", None) else spec.default or 0),
             min=spec.minimum,
             max=spec.maximum,
@@ -410,16 +659,26 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             id=spec.widget_id,
         )
     if spec.kind == "bool":
-        return lcars.toggle(spec.label, value=bool(value), id=spec.widget_id)
+        return lcars.toggle(label, value=bool(value), id=spec.widget_id)
     if spec.kind == "tri_bool":
         selected = str(value if value not in (None, "") else "unset")
         if selected not in {"unset", "true", "false"}:
             selected = "true" if selected.lower() in {"1", "yes", "on"} else selected
-        return lcars.select(spec.label, ["unset", "true", "false"], value=selected, id=spec.widget_id)
+        return lcars.select(label, ["unset", "true", "false"], value=selected, id=spec.widget_id)
     selected = str(value if value not in (None, "") else (spec.default or ""))
     if spec.options and selected not in spec.options:
         selected = ""
-    return lcars.select(spec.label, list(spec.options), value=selected, id=spec.widget_id)
+    return lcars.select(label, list(spec.options), value=selected, id=spec.widget_id)
+
+
+def _field_label(spec: FieldSpec) -> str:
+    if spec.key in SETUP_REQUIRED_KEYS:
+        return f"{spec.label} [required]"
+    if spec.optional:
+        return f"{spec.label} [optional]"
+    if spec.default is not None:
+        return f"{spec.label} [ui {spec.default}]"
+    return spec.label
 
 
 def _config_page_actions(suffix: str) -> None:
@@ -548,12 +807,96 @@ def _stop_axolotl_action() -> None:
     lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
 
 
-def _hf_search_action(query: str, repo_type: str) -> None:
+def _setup_apply_recipe_action(recipe: str) -> None:
+    updates = SETUP_RECIPES.get(recipe)
+    if not updates:
+        lcars.notify("Unknown setup recipe.", level="error")
+        return
+    try:
+        STATE.config_store.apply_updates(updates)
+        lcars.notify(f"Applied setup recipe: {recipe}.")
+        _update_config_widgets()
+        _run_preflight_action()
+    except Exception as exc:
+        lcars.notify(f"Could not apply setup recipe: {exc}", level="error")
+
+
+def _setup_apply_model_action(model: str) -> None:
+    try:
+        STATE.config_store.apply_model(model)
+        lcars.notify(f"Applied model preset: {model}.")
+        _update_config_widgets()
+        _run_preflight_action()
+    except Exception as exc:
+        lcars.notify(f"Could not apply model preset: {exc}", level="error")
+
+
+def _setup_apply_dataset_action(dataset: str) -> None:
+    preset = DATASET_PRESETS.get(dataset)
+    if preset is None:
+        lcars.notify("Unknown dataset preset.", level="error")
+        return
+    try:
+        path, dataset_type = preset
+        STATE.config_store.apply_dataset(path, dataset_type)
+        lcars.notify(f"Applied dataset preset: {path}.")
+        _update_config_widgets()
+        _run_preflight_action()
+    except Exception as exc:
+        lcars.notify(f"Could not apply dataset preset: {exc}", level="error")
+
+
+def _hf_search_action(
+    query: str,
+    repo_type: str,
+    *,
+    sort: str = "downloads",
+    compatibility: str = HF_COMPATIBILITY_OPTIONS[0],
+    limit: str = "12",
+) -> None:
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
-    results = STATE.hf.search(query, repo_type)  # type: ignore[arg-type]
-    lcars.update("hf-results-table", **_table_payload(search_rows(results)))
+    results = STATE.hf.search(
+        query,
+        repo_type,  # type: ignore[arg-type]
+        sort=sort,
+        compatible_only=compatibility == HF_COMPATIBILITY_OPTIONS[0],
+        limit=_bounded_int(limit, default=12, minimum=1, maximum=50),
+    )
+    _update_hf_widgets()
+    if results:
+        _set_widget_value("hf-repo-id", results[0].repo_id)
+    _append_hf_logs()
+
+
+def _hf_select_result_action(repo_id: str, revision: str = "") -> None:
+    result = STATE.hf.select_result(repo_id)
+    if result is None:
+        lcars.notify("Select a Hugging Face result first.", level="error")
+        return
+    _set_widget_value("hf-repo-id", result.repo_id)
+    _set_widget_value("hf-repo-type", result.repo_type)
+    STATE.hf.inspect_repo(result.repo_id, result.repo_type, revision=revision.strip() or None)
+    _update_hf_widgets()
+    _append_hf_logs()
+
+
+def _hf_inspect_action(repo_id: str, repo_type: str, revision: str = "") -> None:
+    if repo_type not in {"model", "dataset"}:
+        lcars.notify("Repo type must be model or dataset.", level="error")
+        return
+    details = STATE.hf.inspect_repo(repo_id, repo_type, revision=revision.strip() or None)  # type: ignore[arg-type]
+    if details is not None:
+        _set_widget_value("hf-repo-id", details.result.repo_id)
+        _set_widget_value("hf-repo-type", details.result.repo_type)
+    _update_hf_widgets()
+    _append_hf_logs()
+
+
+def _hf_related_action(repo_id: str) -> None:
+    STATE.hf.find_related_models(repo_id)
+    _update_hf_widgets()
     _append_hf_logs()
 
 
@@ -561,10 +904,14 @@ def _hf_download_action(repo_id: str, repo_type: str, revision: str) -> None:
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
+    result = _hf_result_for(repo_id)
+    if result is not None and result.blocked:
+        lcars.notify(f"Download blocked: {result.compatibility}", level="error")
+        return
     try:
         STATE.hf.start_download(repo_id, repo_type, revision=revision.strip() or None)  # type: ignore[arg-type]
         lcars.notify(f"Download queued for {repo_id}.")
-        lcars.update("hf-jobs-table", **_table_payload(STATE.hf.job_rows()))
+        _update_hf_widgets()
     except Exception as exc:
         lcars.notify(f"Download failed to queue: {exc}", level="error")
 
@@ -572,10 +919,15 @@ def _hf_download_action(repo_id: str, repo_type: str, revision: str) -> None:
 def _hf_use_repo_action(repo_id: str, repo_type: str) -> None:
     try:
         if repo_type == "model":
-            if _looks_gguf(repo_id):
-                lcars.notify("Refusing to set a likely GGUF model repo as Axolotl base_model.", level="error")
+            result = _hf_result_for(repo_id)
+            if result is not None and result.role == "peft_adapter":
+                STATE.config_store.apply_updates({"lora_model_dir": repo_id, "adapter": "lora"})
+            elif _looks_gguf(repo_id) or (result is not None and result.blocked):
+                detail = result.compatibility if result is not None else "likely GGUF/runtime artifact"
+                lcars.notify(f"Refusing to set incompatible model repo as Axolotl base_model: {detail}", level="error")
                 return
-            STATE.config_store.apply_model(repo_id)
+            else:
+                STATE.config_store.apply_model(repo_id)
         elif repo_type == "dataset":
             STATE.config_store.apply_dataset(repo_id)
         else:
@@ -594,7 +946,10 @@ def _hf_use_last_local_action(repo_type: str) -> None:
         lcars.notify("No completed local HF snapshot is available yet.", level="error")
         return
     try:
-        if repo_type == "model":
+        result = STATE.hf.selected_details.result if STATE.hf.selected_details else None
+        if repo_type == "model" and result is not None and result.role == "peft_adapter":
+            STATE.config_store.apply_updates({"lora_model_dir": path, "adapter": "lora"})
+        elif repo_type == "model":
             STATE.config_store.apply_model(path)
         else:
             STATE.config_store.apply_dataset(path)
@@ -626,6 +981,23 @@ def _ollama_refresh_action() -> None:
         lcars.notify(f"Detected {len(STATE.ollama.models)} Ollama model(s).")
 
 
+def _ollama_search_hf_action(model_name: str) -> None:
+    model = STATE.ollama.select(model_name.strip())
+    if model is None:
+        lcars.notify("Ollama model was not found. Refresh and enter the exact name:tag.", level="error")
+        return
+    query = model.hf_query or model.hf_hint or model.name.split(":", 1)[0]
+    results = STATE.hf.search(query, "model", limit=12, sort="downloads", compatible_only=True)
+    if model.hf_hint and not _looks_gguf(model.hf_hint):
+        STATE.hf.inspect_repo(model.hf_hint, "model")
+    _update_hf_widgets()
+    if results:
+        _set_widget_value("hf-query", query)
+        _set_widget_value("hf-repo-id", results[0].repo_id)
+    lcars.notify(f"HF model search loaded for Ollama source: {query}.")
+    _append_hf_logs()
+
+
 def _ollama_use_source_action(model_name: str) -> None:
     model = STATE.ollama.select(model_name.strip())
     if model is None:
@@ -642,6 +1014,7 @@ def _ollama_use_source_action(model_name: str) -> None:
 
 def live_tick() -> None:
     snapshot = STATE.telemetry.sample()
+    STATE.resource_tick += 1
     lcars.update("system-cpu", value=f"{snapshot.cpu_percent:.0f}%", status=_percent_status(snapshot.cpu_percent))
     lcars.update("system-ram", value=f"{snapshot.ram_percent:.0f}%", status=_percent_status(snapshot.ram_percent))
     lcars.update("cpu-gauge", value=snapshot.cpu_percent)
@@ -653,7 +1026,11 @@ def live_tick() -> None:
     )
     lcars.update("gpu-table", **_table_payload(gpu_rows(snapshot.gpus)))
     lcars.update("run-gpu-table", **_table_payload(gpu_rows(snapshot.gpus)))
+    lcars.update("process-table", **_table_payload(process_rows()))
+    lcars.update("gpu-process-table", **_table_payload(gpu_process_rows()))
     lcars.update("disk-table", **_table_payload(disk_rows(snapshot.disks)))
+    if STATE.resource_tick % 5 == 0:
+        lcars.update("storage-hotspot-table", **_table_payload(_storage_rows(_load_config_or_empty())))
     lcars.update("resource-chart", series=_series_payload(STATE.telemetry.chart_payload()))
     lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
     _append_runner_logs()
@@ -696,6 +1073,18 @@ def _update_config_widgets() -> None:
     for widget_id, value in values.items():
         store[widget_id] = value
         lcars.update(widget_id, value=value)
+    lcars.update("setup-defaults-table", **_table_payload(_setup_default_rows()))
+
+
+def _update_hf_widgets() -> None:
+    selected_options = result_options(STATE.hf.search_results)
+    selected_value = STATE.hf.last_repo_id if STATE.hf.last_repo_id in selected_options else selected_options[0]
+    lcars.update("hf-results-table", **_table_payload(search_rows(STATE.hf.search_results)))
+    lcars.update("hf-detail-table", **_table_payload(detail_summary_rows(STATE.hf.selected_details)))
+    lcars.update("hf-files-table", **_table_payload(detail_file_rows(STATE.hf.selected_details)))
+    lcars.update("hf-related-table", **_table_payload(related_rows(STATE.hf.related_results)))
+    lcars.update("hf-jobs-table", **_table_payload(STATE.hf.job_rows()))
+    lcars.update("hf-result-select", options=_select_options(selected_options), value=selected_value)
 
 
 def _update_cache_widgets(*, live: bool = False) -> None:
@@ -708,6 +1097,16 @@ def _update_cache_widgets(*, live: bool = False) -> None:
     lcars.update("hf-jobs-table", **_table_payload(STATE.hf.job_rows()))
     if not live:
         _append_hf_logs()
+
+
+def _hf_result_for(repo_id: str) -> Any:
+    repo_id = repo_id.strip()
+    if STATE.hf.selected_details and STATE.hf.selected_details.result.repo_id == repo_id:
+        return STATE.hf.selected_details.result
+    for result in [*STATE.hf.search_results, *STATE.hf.related_results]:
+        if result.repo_id == repo_id:
+            return result
+    return None
 
 
 def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] | None = None) -> FastAPI:
@@ -884,6 +1283,21 @@ def _load_config_or_empty() -> dict[str, Any]:
         return {}
 
 
+def _config_path_value(cfg: dict[str, Any], dotted: str) -> Any:
+    node: Any = cfg
+    for part in dotted.split("."):
+        if isinstance(node, list):
+            try:
+                node = node[int(part)]
+            except (ValueError, IndexError):
+                return None
+        elif isinstance(node, dict):
+            node = node.get(part)
+        else:
+            return None
+    return node
+
+
 def _table_payload(rows: list[dict[str, str]]) -> dict[str, Any]:
     if not rows:
         return {"headers": [], "rows": []}
@@ -895,6 +1309,25 @@ def _table_payload(rows: list[dict[str, str]]) -> dict[str, Any]:
             for index, row in enumerate(rows)
         ],
     }
+
+
+def _select_options(options: list[str]) -> list[dict[str, str]]:
+    return [{"label": option or "(none)", "value": option} for option in options]
+
+
+def _set_widget_value(widget_id: str, value: str) -> None:
+    ctx = get_ctx()
+    store = get_session_state(ctx.session_id)
+    store[widget_id] = value
+    lcars.update(widget_id, value=value)
+
+
+def _bounded_int(value: str, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except ValueError:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def _series_payload(data: dict[str, list[float]]) -> list[dict[str, Any]]:

@@ -59,6 +59,8 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 - Structured Axolotl config editor split into Setup, Train, Hardware, and Tracking pages.
 - 484 surfaced Axolotl config keys, including advanced dataset, tokenizer, PEFT, optimizer,
   kernel, FSDP, DeepSpeed, TRL, vLLM, evaluation, and integration settings.
+- Smart Setup recipes, model/dataset presets, and an Axolotl-defaults table that separates
+  upstream defaults from this UI's starter suggestions.
 - Raw YAML editor at `/raw`.
 - Preflight gate that blocks or warns on model formats, local file paths, dataset shape,
   quantization/adapters, precision conflicts, attention backends, distributed settings,
@@ -67,10 +69,13 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   evaluate, lm-eval, and quantize commands.
 - Separate Axolotl action args and launcher args. Launcher args are placed after `--`, matching
   Axolotl's launcher command shape.
-- CPU, RAM, GPU, and disk telemetry.
-- Hugging Face model/dataset search and `snapshot_download` downloads into the standard HF cache.
+- CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
+- Hugging Face model/dataset search with compatibility classification, repo inspection,
+  copyable selected repo ids, compatible-file listings, fine-tune lookup, and filtered
+  `snapshot_download` downloads into the standard HF cache.
 - Hugging Face cache table, size accounting, and cached repo deletion.
-- Ollama local model detection with compatibility notes.
+- Ollama local model detection that can apply real local Transformers directories or launch a
+  compatible Hugging Face source search for runtime-only Ollama/GGUF models.
 
 ## Axolotl Model Format Guardrail
 
@@ -80,3 +85,7 @@ Ollama GGUF/internal blob models are detected and blocked as Axolotl `base_model
 
 Ollama models are only applied automatically when Ollama exposes a readable local
 Safetensors/Transformers model directory as the model source.
+
+The HF Hub browser only downloads Axolotl-relevant file patterns by default: model config,
+tokenizer/support files, `.safetensors`, `.bin`, and `.pt` weights for models, and
+JSON/JSONL/Parquet/CSV/Arrow/text-style files for datasets.
