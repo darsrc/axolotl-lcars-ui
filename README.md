@@ -5,8 +5,9 @@ Hugging Face content management, and Ollama model detection.
 
 Built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 
-Project documentation is available in [docs/wiki/Home.md](docs/wiki/Home.md). The GitHub wiki is
-enabled for this repository as well.
+Project documentation is available in [docs/wiki/Home.md](docs/wiki/Home.md). The GitHub wiki
+setting is enabled, but GitHub does not create the hidden `.wiki.git` repo until the first page is
+created in the GitHub web UI.
 
 ## Launch
 
