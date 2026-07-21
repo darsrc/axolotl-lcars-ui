@@ -1,0 +1,34 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+src/*.egg-info/
+outputs/
+last_run_prepared/
+*.log
+
+# Local secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+*.local
+*.local.*
+configs/*.local.yml
+configs/*.local.yaml
+
+# Model/data caches and generated training artifacts
+.cache/
+hf-cache/
+huggingface/
+wandb/
+mlruns/
+comet/
+runs/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.gguf
