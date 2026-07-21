@@ -5,6 +5,9 @@ Hugging Face content management, and Ollama model detection.
 
 Built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 
+Project documentation is available in [docs/wiki/Home.md](docs/wiki/Home.md). The GitHub wiki is
+enabled for this repository as well.
+
 ## Launch
 
 The project is intended to run from a Python virtual environment:
