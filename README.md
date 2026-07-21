@@ -10,15 +10,31 @@ enabled for this repository as well.
 
 ## Launch
 
-The project is intended to run from a Python virtual environment:
+Use Python 3.11 unless your Axolotl install target requires a different supported Python version.
+The repository includes `.python-version` for tools that honor it.
+
+### Install With uv
 
 ```bash
-python3 -m venv .venv
+uv python install 3.11
+uv venv --python 3.11
+uv pip install -r requirements.txt
+```
+
+### Install With venv/pip
+
+```bash
+python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-For local `lcars-ui` development, install your own checkout into the venv in editable mode before
-launching the app.
+`requirements.txt` installs `lcars-ui` directly from
+[darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). For local `lcars-ui` development,
+install your own checkout into the venv in editable mode after installing requirements:
+
+```bash
+uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
+```
 
 Start the app:
 
