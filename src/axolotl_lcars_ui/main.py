@@ -473,7 +473,11 @@ def _resources_page() -> None:
 
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
-        with lcars.control_panel("Search & Acquire", color="lilac", zone="primary", id="search-command"):
+        with lcars.data_panel("Search Results", color="lilac", zone="primary"):
+            lcars.markdown(result_link_markdown(STATE.hf.search_results), id="hf-results-links")
+            lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
+
+        with lcars.control_panel("Search Controls", color="lilac", zone="side", id="search-command"):
             _seed_text("hf-query", "llama instruct")
             query = lcars.text_input("Search", placeholder="model or dataset query", autocomplete=False, id="hf-query")
             repo_type = lcars.select("Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="hf-repo-type")
@@ -516,8 +520,6 @@ def _hub_page() -> None:
                     fit_filter="any",
                     vram_limit=vram_limit,
                 )
-
-        with lcars.control_panel("Sift Current Results", color="blue-bell", zone="side"):
             _seed_text("hf-sift", "")
             sift = lcars.text_input("Contains [optional]", placeholder="repo, tag, quant, family", autocomplete=False, id="hf-sift")
             local_sort = lcars.select("Result Sort", HF_LOCAL_SORT_OPTIONS, value="downloads", id="hf-local-sort")
@@ -542,33 +544,19 @@ def _hub_page() -> None:
                     fit_filter=fit_filter,
                     vram_limit=vram_limit,
                 )
-
-        with lcars.data_panel("Search Results", color="lilac", zone="primary"):
-            lcars.markdown(result_link_markdown(STATE.hf.search_results), id="hf-results-links")
-            lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
-
-        with lcars.data_panel("Selected Repository", color="anakiwa", zone="dock"):
             hf_options = result_options(STATE.hf.search_results)
+            if STATE.hf.last_repo_id and STATE.hf.last_repo_id not in hf_options:
+                hf_options = [STATE.hf.last_repo_id, *[option for option in hf_options if option]]
             result_choice = lcars.select(
                 "Search Result",
                 hf_options,
                 value=STATE.hf.last_repo_id if STATE.hf.last_repo_id in hf_options else "",
                 id="hf-result-select",
             )
-            _seed_text("hf-repo-id", STATE.hf.last_repo_id)
+            _seed_text("hf-repo-id", STATE.hf.last_repo_id, force=True)
             repo_id = lcars.text_input("Copy Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
             _seed_text("hf-revision", "")
             revision = lcars.text_input("Revision [optional]", placeholder="branch/tag/commit", autocomplete=False, id="hf-revision")
-            lcars.markdown(_hf_selected_markdown(repo_id, repo_type), id="hf-selected-link")
-
-        with lcars.data_panel("Repo Intelligence", color="blue-bell", zone="dock"):
-            lcars.table(detail_summary_rows(STATE.hf.selected_details), title="Selected Repo", id="hf-detail-table")
-            lcars.table(detail_file_rows(STATE.hf.selected_details), title="Compatible / Quant Files", id="hf-files-table")
-
-        with lcars.data_panel("Fine-Tunes / Related", color="pale-canary", zone="dock"):
-            lcars.table(related_rows(STATE.hf.related_results), title="Related Models", id="hf-related-table")
-
-        with lcars.control_panel("Repository Actions", color="tanoi", zone="dock"):
             if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
                 _hf_select_result_action(result_choice, revision)
             if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
@@ -581,6 +569,12 @@ def _hub_page() -> None:
                 _hf_use_repo_action(repo_id, repo_type)
             if lcars.button("Use Last Local Snapshot", color="blue-bell", id="hf-use-local"):
                 _hf_use_last_local_action(repo_type)
+
+        with lcars.data_panel("Selection", color="anakiwa", zone="dock", id="selection-panel"):
+            lcars.markdown(_hf_selected_markdown(repo_id, repo_type), id="hf-selected-link")
+            lcars.table(detail_summary_rows(STATE.hf.selected_details), title="Selected Repo", id="hf-detail-table")
+            lcars.table(detail_file_rows(STATE.hf.selected_details), title="Compatible / Quant Files", id="hf-files-table")
+            lcars.table(related_rows(STATE.hf.related_results), title="Related Models", id="hf-related-table")
 
         with lcars.data_panel("Transfers", color="golden-tanoi", zone="dock"):
             lcars.table(STATE.hf.job_rows(), title="Download Jobs", id="hf-jobs-table")
@@ -675,7 +669,7 @@ def _hf_selected_markdown(repo_id: str, repo_type: str) -> str:
     if not repo_id:
         return "No repository selected."
     prefix = "datasets/" if repo_type == "dataset" else ""
-    return f"[Open on Hugging Face](https://huggingface.co/{prefix}{repo_id})"
+    return f"HF path: `huggingface.co/{prefix}{repo_id}`"
 
 
 def _ollama_rule_rows() -> list[dict[str, str]]:
@@ -1307,12 +1301,12 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
 
         app.state._live_coro_factory = _live_loop
 
-    _install_hf_routes(app)
+    _install_hf_routes(app, ui_fn, build_ctx.config)
     _install_raw_editor(app)
     return app
 
 
-def _install_hf_routes(app: FastAPI) -> None:
+def _install_hf_routes(app: FastAPI, ui_fn: Callable[[], None], config: Any) -> None:
     @app.get("/hf/select/{repo_type}/{repo_id:path}", include_in_schema=False)
     def hf_select(repo_type: str, repo_id: str) -> RedirectResponse:
         repo_id = unquote(repo_id).strip()
@@ -1320,9 +1314,23 @@ def _install_hf_routes(app: FastAPI) -> None:
             result = STATE.hf.select_result(repo_id)
             selected_type = result.repo_type if result is not None else repo_type
             STATE.hf.inspect_repo(repo_id, selected_type)  # type: ignore[arg-type]
+            _refresh_manifest(app, ui_fn, config)
         return RedirectResponse("/?page=hub")
 
     _move_last_route_before_spa(app)
+
+
+def _refresh_manifest(app: FastAPI, ui_fn: Callable[[], None], config: Any) -> None:
+    build_ctx = _LCARSContext(
+        mode=Mode.BUILD,
+        session_id="build",
+        builder=_ManifestBuilder(),
+        config=config,
+    )
+    set_ctx(build_ctx)
+    ui_fn()
+    assert build_ctx.builder is not None
+    app.state.manifest = build_ctx.builder.build(build_ctx.config)
 
 
 def _install_raw_editor(app: FastAPI) -> None:
@@ -1418,10 +1426,13 @@ def _collect_editor_values() -> dict[str, Any]:
     return values
 
 
-def _seed_text(widget_id: str, value: str) -> None:
+def _seed_text(widget_id: str, value: str, *, force: bool = False) -> None:
     ctx = get_ctx()
     store = get_session_state(ctx.session_id)
-    store.setdefault(widget_id, value)
+    if force and ctx.mode == Mode.BUILD:
+        store[widget_id] = value
+    else:
+        store.setdefault(widget_id, value)
 
 
 def _load_config_or_empty() -> dict[str, Any]:

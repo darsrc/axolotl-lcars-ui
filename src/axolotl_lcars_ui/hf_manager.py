@@ -558,12 +558,12 @@ def result_link_markdown(results: list[SearchResult]) -> str:
     lines = []
     for index, item in enumerate(results[:20], start=1):
         encoded = quote(item.repo_id, safe="")
-        href = _hf_url(item)
         select_href = f"/hf/select/{item.repo_type}/{encoded}"
         size = item.quants or item.weights or item.size or "inspect for sizes"
         fit = item.fit or "fit unknown"
+        hf_path = _hf_path(item)
         lines.append(
-            f"{index}. [{item.repo_id}]({href}) - [select]({select_href}) - {fit} - {size}"
+            f"{index}. [{item.repo_id}]({select_href}) - {fit} - {size} - `{hf_path}`"
         )
     return "\n".join(lines)
 
@@ -631,9 +631,9 @@ def _compact_size_cell(item: SearchResult) -> str:
     return item.quants or item.weights or item.size or item.params or "inspect"
 
 
-def _hf_url(item: SearchResult) -> str:
+def _hf_path(item: SearchResult) -> str:
     prefix = "datasets/" if item.repo_type == "dataset" else ""
-    return f"https://huggingface.co/{prefix}{item.repo_id}"
+    return f"huggingface.co/{prefix}{item.repo_id}"
 
 
 def _use_as(item: SearchResult) -> str:
