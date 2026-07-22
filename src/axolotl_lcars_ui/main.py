@@ -86,7 +86,17 @@ SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
 HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
 HF_LOCAL_SORT_OPTIONS = ["downloads", "likes", "fit", "size", "updated", "repo"]
 HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
-HF_FORMAT_FILTER_OPTIONS = ["any", "hf weights", "adapters", "runtime quants", "datasets"]
+HF_ARTIFACT_FILTER_OPTIONS = ["any artifact", "base/trainable models", "PEFT adapters", "datasets", "runtime only"]
+HF_QUANT_FILTER_OPTIONS = [
+    "any weight format",
+    "Transformers safetensors",
+    "full precision fp16/bf16",
+    "4-bit quantized",
+    "8-bit quantized",
+    "GPTQ quantized",
+    "AWQ quantized",
+    "GGUF runtime files",
+]
 HF_FIT_FILTER_OPTIONS = ["any", "known size", "fits vram"]
 HF_LIMIT_OPTIONS = ["12", "25", "50"]
 SETUP_FIELD_KEYS = {
@@ -463,7 +473,7 @@ def _resources_page() -> None:
 
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
-        with lcars.control_panel("Search Command", color="lilac", zone="side"):
+        with lcars.control_panel("Search & Acquire", color="lilac", zone="primary", id="search-command"):
             _seed_text("hf-query", "llama instruct")
             query = lcars.text_input("Search", placeholder="model or dataset query", autocomplete=False, id="hf-query")
             repo_type = lcars.select("Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="hf-repo-type")
@@ -478,13 +488,60 @@ def _hub_page() -> None:
                 step=1,
                 id="hf-vram-limit",
             )
+            if lcars.button("Run Search", color="anakiwa", id="hf-search"):
+                _hf_search_action(
+                    query,
+                    repo_type,
+                    sort=sort,
+                    compatibility=compatibility,
+                    limit=limit,
+                    sift="",
+                    local_sort="downloads",
+                    artifact_filter=HF_ARTIFACT_FILTER_OPTIONS[0],
+                    quant_filter=HF_QUANT_FILTER_OPTIONS[0],
+                    fit_filter="any",
+                    vram_limit=vram_limit,
+                )
+            if _is_active_action("hf-query"):
+                _hf_search_action(
+                    query,
+                    repo_type,
+                    sort=sort,
+                    compatibility=compatibility,
+                    limit=limit,
+                    sift="",
+                    local_sort="downloads",
+                    artifact_filter=HF_ARTIFACT_FILTER_OPTIONS[0],
+                    quant_filter=HF_QUANT_FILTER_OPTIONS[0],
+                    fit_filter="any",
+                    vram_limit=vram_limit,
+                )
 
         with lcars.control_panel("Sift Current Results", color="blue-bell", zone="side"):
             _seed_text("hf-sift", "")
             sift = lcars.text_input("Contains [optional]", placeholder="repo, tag, quant, family", autocomplete=False, id="hf-sift")
             local_sort = lcars.select("Result Sort", HF_LOCAL_SORT_OPTIONS, value="downloads", id="hf-local-sort")
-            format_filter = lcars.select("Format", HF_FORMAT_FILTER_OPTIONS, value="any", id="hf-format-filter")
+            artifact_filter = lcars.select("Artifact", HF_ARTIFACT_FILTER_OPTIONS, value=HF_ARTIFACT_FILTER_OPTIONS[0], id="hf-artifact-filter")
+            quant_filter = lcars.select("Weight Format", HF_QUANT_FILTER_OPTIONS, value=HF_QUANT_FILTER_OPTIONS[0], id="hf-quant-filter")
             fit_filter = lcars.select("VRAM Fit", HF_FIT_FILTER_OPTIONS, value="any", id="hf-fit-filter")
+            if lcars.button("Apply Sift", color="blue-bell", id="hf-apply-sift"):
+                _hf_sift_action(
+                    sift=sift,
+                    local_sort=local_sort,
+                    artifact_filter=artifact_filter,
+                    quant_filter=quant_filter,
+                    fit_filter=fit_filter,
+                    vram_limit=vram_limit,
+                )
+            if _is_active_action("hf-sift"):
+                _hf_sift_action(
+                    sift=sift,
+                    local_sort=local_sort,
+                    artifact_filter=artifact_filter,
+                    quant_filter=quant_filter,
+                    fit_filter=fit_filter,
+                    vram_limit=vram_limit,
+                )
 
         with lcars.data_panel("Search Results", color="lilac", zone="primary"):
             lcars.markdown(result_link_markdown(STATE.hf.search_results), id="hf-results-links")
@@ -511,58 +568,23 @@ def _hub_page() -> None:
         with lcars.data_panel("Fine-Tunes / Related", color="pale-canary", zone="dock"):
             lcars.table(related_rows(STATE.hf.related_results), title="Related Models", id="hf-related-table")
 
+        with lcars.control_panel("Repository Actions", color="tanoi", zone="dock"):
+            if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
+                _hf_select_result_action(result_choice, revision)
+            if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
+                _hf_inspect_action(repo_id, repo_type, revision)
+            if lcars.button("Find Fine-Tunes", color="lilac", id="hf-related"):
+                _hf_related_action(repo_id)
+            if lcars.button("Download Selected", color="golden-tanoi", id="hf-download"):
+                _hf_download_action(repo_id, repo_type, revision)
+            if lcars.button("Use Repo In Config", color="tanoi", id="hf-use-repo"):
+                _hf_use_repo_action(repo_id, repo_type)
+            if lcars.button("Use Last Local Snapshot", color="blue-bell", id="hf-use-local"):
+                _hf_use_last_local_action(repo_type)
+
         with lcars.data_panel("Transfers", color="golden-tanoi", zone="dock"):
             lcars.table(STATE.hf.job_rows(), title="Download Jobs", id="hf-jobs-table")
             lcars.log(LOG_HF, max_lines=300, title="HF Activity")
-
-        with lcars.control_panel("Search", color="anakiwa", zone="dock"):
-            if lcars.button("Run Search", color="anakiwa", id="hf-search"):
-                _hf_search_action(
-                    query,
-                    repo_type,
-                    sort=sort,
-                    compatibility=compatibility,
-                    limit=limit,
-                    sift=sift,
-                    local_sort=local_sort,
-                    format_filter=format_filter,
-                    fit_filter=fit_filter,
-                    vram_limit=vram_limit,
-                )
-
-        with lcars.control_panel("Sift", color="blue-bell", zone="dock"):
-            if lcars.button("Apply Sift", color="blue-bell", id="hf-apply-sift"):
-                _hf_sift_action(
-                    sift=sift,
-                    local_sort=local_sort,
-                    format_filter=format_filter,
-                    fit_filter=fit_filter,
-                    vram_limit=vram_limit,
-                )
-
-        with lcars.control_panel("Select", color="lilac", zone="dock"):
-            if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
-                _hf_select_result_action(result_choice, revision)
-
-        with lcars.control_panel("Inspect", color="anakiwa", zone="dock"):
-            if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
-                _hf_inspect_action(repo_id, repo_type, revision)
-
-        with lcars.control_panel("Lineage", color="pale-canary", zone="dock"):
-            if lcars.button("Find Fine-Tunes", color="lilac", id="hf-related"):
-                _hf_related_action(repo_id)
-
-        with lcars.control_panel("Acquire", color="golden-tanoi", zone="dock"):
-            if lcars.button("Download Selected", color="golden-tanoi", id="hf-download"):
-                _hf_download_action(repo_id, repo_type, revision)
-
-        with lcars.control_panel("Use", color="tanoi", zone="dock"):
-            if lcars.button("Use Repo In Config", color="tanoi", id="hf-use-repo"):
-                _hf_use_repo_action(repo_id, repo_type)
-
-        with lcars.control_panel("Local", color="blue-bell", zone="dock"):
-            if lcars.button("Use Last Local Snapshot", color="blue-bell", id="hf-use-local"):
-                _hf_use_last_local_action(repo_type)
 
 
 def _content_page() -> None:
@@ -927,7 +949,8 @@ def _hf_search_action(
     limit: str = "12",
     sift: str = "",
     local_sort: str = "downloads",
-    format_filter: str = "any",
+    artifact_filter: str = "any",
+    quant_filter: str = "any",
     fit_filter: str = "any",
     vram_limit: float | int | str = 0,
 ) -> None:
@@ -945,7 +968,8 @@ def _hf_search_action(
     results = STATE.hf.sift_results(
         text=sift,
         sort=local_sort,
-        format_filter=format_filter,
+        artifact_filter=artifact_filter,
+        quant_filter=quant_filter,
         fit_filter=fit_filter,
         vram_limit_gb=vram,
     )
@@ -959,14 +983,16 @@ def _hf_sift_action(
     *,
     sift: str,
     local_sort: str,
-    format_filter: str,
+    artifact_filter: str,
+    quant_filter: str,
     fit_filter: str,
     vram_limit: float | int | str,
 ) -> None:
     results = STATE.hf.sift_results(
         text=sift,
         sort=local_sort,
-        format_filter=format_filter,
+        artifact_filter=artifact_filter,
+        quant_filter=quant_filter,
         fit_filter=fit_filter,
         vram_limit_gb=_optional_float(vram_limit),
     )
@@ -1458,6 +1484,11 @@ def _optional_float(value: float | int | str) -> float | None:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
+
+
+def _is_active_action(widget_id: str) -> bool:
+    ctx = get_ctx()
+    return ctx.mode == Mode.HANDLE and ctx.active_action_id == widget_id
 
 
 def _series_payload(data: dict[str, list[float]]) -> list[dict[str, Any]]:

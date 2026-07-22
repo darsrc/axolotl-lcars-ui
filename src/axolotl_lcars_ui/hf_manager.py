@@ -163,13 +163,15 @@ class HuggingFaceManager:
         *,
         text: str = "",
         sort: str = "downloads",
-        format_filter: str = "any",
+        artifact_filter: str = "any",
+        quant_filter: str = "any",
         fit_filter: str = "any",
         vram_limit_gb: float | None = None,
     ) -> list[SearchResult]:
         text = text.strip().lower()
         sort = _normalize_local_sort(sort)
-        format_filter = format_filter or "any"
+        artifact_filter = artifact_filter or "any"
+        quant_filter = quant_filter or "any"
         fit_filter = fit_filter or "any"
         self.vram_limit_gb = vram_limit_gb if vram_limit_gb and vram_limit_gb > 0 else None
         results = []
@@ -188,7 +190,9 @@ class HuggingFaceManager:
             ).lower()
             if text and text not in haystack:
                 continue
-            if not _format_matches(result, format_filter):
+            if not _artifact_matches(result, artifact_filter):
+                continue
+            if not _quant_matches(result, quant_filter):
                 continue
             if fit_filter == "fits vram" and not result.fit.startswith("fits"):
                 continue
@@ -424,9 +428,7 @@ class HuggingFaceManager:
         siblings = _siblings(item)
         filenames = [_sibling_path(sibling) for sibling in siblings]
         classification = _classify_repo(repo_type, repo_id, filenames, tags)
-        base_models = getattr(item, "base_models", None) or getattr(item, "baseModels", None) or []
-        if isinstance(base_models, str):
-            base_models = [base_models]
+        base_models = _base_model_ids(getattr(item, "base_models", None) or getattr(item, "baseModels", None))
         children_count = getattr(item, "children_model_count", None) or getattr(item, "childrenModelCount", None)
         size = _repo_size(item, siblings)
         weight_bytes = _weight_bytes(repo_type, filenames, siblings, size)
@@ -462,62 +464,68 @@ class HuggingFaceManager:
 
     def _list_models(self, *, query: str, sort: str, limit: int) -> object:
         try:
-            return self.api.list_models(
-                search=query,
-                sort=sort,
-                limit=limit,
-                expand=[
-                    "baseModels",
-                    "childrenModelCount",
-                    "downloads",
-                    "gated",
-                    "gguf",
-                    "lastModified",
-                    "library_name",
-                    "likes",
-                    "pipeline_tag",
-                    "safetensors",
-                    "sha",
-                    "siblings",
-                    "tags",
-                    "usedStorage",
-                ],
-                token=self._token(),
+            return list(
+                self.api.list_models(
+                    search=query,
+                    sort=sort,
+                    limit=limit,
+                    expand=[
+                        "baseModels",
+                        "downloads",
+                        "gated",
+                        "gguf",
+                        "lastModified",
+                        "library_name",
+                        "likes",
+                        "pipeline_tag",
+                        "safetensors",
+                        "sha",
+                        "siblings",
+                        "tags",
+                        "transformersInfo",
+                    ],
+                    token=self._token(),
+                )
             )
         except Exception:
-            return self.api.list_models(
-                search=query,
-                sort=sort,
-                limit=limit,
-                full=True,
-                token=self._token(),
+            return list(
+                self.api.list_models(
+                    search=query,
+                    sort=sort,
+                    limit=limit,
+                    full=True,
+                    token=self._token(),
+                )
             )
 
     def _list_datasets(self, *, query: str, sort: str, limit: int) -> object:
         try:
-            return self.api.list_datasets(
-                search=query,
-                sort=sort,
-                limit=limit,
-                expand=[
-                    "downloads",
-                    "gated",
-                    "lastModified",
-                    "likes",
-                    "sha",
-                    "siblings",
-                    "tags",
-                    "usedStorage",
-                ],
-                token=self._token(),
+            return list(
+                self.api.list_datasets(
+                    search=query,
+                    sort=sort,
+                    limit=limit,
+                    expand=[
+                        "downloads",
+                        "gated",
+                        "lastModified",
+                        "likes",
+                        "sha",
+                        "siblings",
+                        "tags",
+                    ],
+                    token=self._token(),
+                )
             )
         except Exception:
-            return self.api.list_datasets(
-                search=query,
-                sort=sort,
-                limit=limit,
-                full=True,
-                token=self._token(),
+            return list(
+                self.api.list_datasets(
+                    search=query,
+                    sort=sort,
+                    limit=limit,
+                    full=True,
+                    token=self._token(),
+                )
             )
 
 
@@ -673,19 +681,48 @@ def _fit_sort_value(item: SearchResult) -> float:
     return 1.0
 
 
-def _format_matches(item: SearchResult, format_filter: str) -> bool:
-    if format_filter == "any":
+def _artifact_matches(item: SearchResult, artifact_filter: str) -> bool:
+    value = (artifact_filter or "any").strip().lower()
+    if value in {"any", "any artifact"}:
         return True
-    haystack = f"{item.role} {item.weights} {item.quants} {item.compatibility}".lower()
-    if format_filter == "hf weights":
-        return any(token in haystack for token in ("safetensors", ".bin", ".pt", "hf weight"))
-    if format_filter == "adapters":
+    haystack = _filter_haystack(item)
+    if value in {"trainable models", "base/trainable models"}:
+        return item.repo_type == "model" and not item.blocked and item.role not in {"peft_adapter", "runtime_quant"}
+    if value in {"adapters", "peft adapters"}:
         return "adapter" in haystack
-    if format_filter == "runtime quants":
+    if value == "runtime only":
         return any(token in haystack for token in ("gguf", "runtime", "onnx", "exl2"))
-    if format_filter == "datasets":
+    if value == "datasets":
         return item.repo_type == "dataset"
     return True
+
+
+def _quant_matches(item: SearchResult, quant_filter: str) -> bool:
+    value = (quant_filter or "any").strip().lower()
+    if value in {"any", "any weight format"} or item.repo_type == "dataset":
+        return True
+    haystack = _filter_haystack(item)
+    checks = {
+        "safetensors": ("safetensors",),
+        "transformers safetensors": ("safetensors",),
+        "bf16/fp16": ("bf16", "fp16", "float16", "bfloat16"),
+        "full precision fp16/bf16": ("bf16", "fp16", "float16", "bfloat16"),
+        "4-bit": ("4-bit", "4bit", "int4", "q4", "gptq", "awq"),
+        "4-bit quantized": ("4-bit", "4bit", "int4", "q4", "gptq", "awq"),
+        "8-bit": ("8-bit", "8bit", "int8", "q8"),
+        "8-bit quantized": ("8-bit", "8bit", "int8", "q8"),
+        "gptq": ("gptq",),
+        "gptq quantized": ("gptq",),
+        "awq": ("awq",),
+        "awq quantized": ("awq",),
+        "gguf": ("gguf",),
+        "gguf runtime files": ("gguf",),
+    }
+    return any(token in haystack for token in checks.get(value, ()))
+
+
+def _filter_haystack(item: SearchResult) -> str:
+    return f"{item.role} {item.weights} {item.quants} {item.compatibility} {item.tags} {item.repo_id}".lower()
 
 
 def _with_fit(item: SearchResult, vram_limit_gb: float | None) -> SearchResult:
@@ -711,6 +748,29 @@ def _allow_patterns(repo_type: RepoType) -> tuple[str, ...]:
 def _siblings(item: object) -> list[object]:
     siblings = getattr(item, "siblings", None) or []
     return list(siblings) if isinstance(siblings, (list, tuple)) else []
+
+
+def _base_model_ids(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        models = value.get("models")
+        if isinstance(models, list):
+            ids = []
+            for model in models:
+                if isinstance(model, dict):
+                    model_id = model.get("id")
+                    if model_id:
+                        ids.append(str(model_id))
+                elif model:
+                    ids.append(str(model))
+            return ids
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return []
 
 
 def _sibling_path(item: object) -> str:
