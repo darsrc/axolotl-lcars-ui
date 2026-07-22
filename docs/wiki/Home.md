@@ -11,8 +11,9 @@ It is built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 - Preflight validation for common expensive mistakes before a run starts.
 - Axolotl CLI process launch, stop, and log monitoring.
 - CPU, RAM, disk, GPU, top-process, GPU-process, and storage-hotspot telemetry.
-- Hugging Face model and dataset search/download/cache management with file compatibility,
-  repo inspection, selected repo ids, and fine-tune lookup.
+- Hugging Face model and dataset search/download/cache management with clickable result links,
+  local sift/sort filters, VRAM-fit filtering, file compatibility, repo inspection, selected repo
+  ids, and fine-tune lookup.
 - Ollama model detection with local-source apply or Hugging Face source search.
 
 ## Main Pages

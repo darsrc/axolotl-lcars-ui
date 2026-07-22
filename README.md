@@ -70,9 +70,10 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 - Separate Axolotl action args and launcher args. Launcher args are placed after `--`, matching
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
-- Hugging Face model/dataset search with compatibility classification, repo inspection,
-  copyable selected repo ids, compatible-file listings, fine-tune lookup, and filtered
-  `snapshot_download` downloads into the standard HF cache.
+- Hugging Face model/dataset search with clickable result links, local sift/sort filters,
+  VRAM-fit filtering, compatibility classification, repo inspection, copyable selected repo
+  ids, compatible-file listings, fine-tune lookup, and filtered `snapshot_download`
+  downloads into the standard HF cache.
 - Hugging Face cache table, size accounting, and cached repo deletion.
 - Ollama local model detection that can apply real local Transformers directories or launch a
   compatible Hugging Face source search for runtime-only Ollama/GGUF models.

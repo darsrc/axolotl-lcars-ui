@@ -9,6 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
+from urllib.parse import quote
 
 from huggingface_hub import HfApi, scan_cache_dir, snapshot_download
 
@@ -42,6 +43,7 @@ DATASET_DOWNLOAD_ALLOW = (
 MODEL_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
 RUNTIME_MODEL_SUFFIXES = (".gguf", ".onnx", ".engine", ".tflite", ".mlx")
 DATASET_SUFFIXES = (".json", ".jsonl", ".parquet", ".csv", ".arrow", ".txt")
+BYTES_PER_GIB = 1024**3
 
 
 @dataclass
@@ -60,9 +62,13 @@ class SearchResult:
     base_models: str = ""
     children: str = ""
     file_count: int = 0
+    size_bytes: int = 0
+    weight_bytes: int = 0
+    params: str = ""
     role: str = ""
     weights: str = ""
     quants: str = ""
+    fit: str = ""
     compatibility: str = ""
     blocked: bool = False
 
@@ -99,6 +105,7 @@ class HuggingFaceManager:
 
     def __init__(self) -> None:
         self.api = HfApi()
+        self.all_search_results: list[SearchResult] = []
         self.search_results: list[SearchResult] = []
         self.related_results: list[SearchResult] = []
         self.selected_details: RepoDetails | None = None
@@ -107,6 +114,7 @@ class HuggingFaceManager:
         self.last_repo_id = ""
         self.last_repo_type: RepoType = "model"
         self.last_local_path = ""
+        self.vram_limit_gb: float | None = None
         self._lock = threading.Lock()
 
     def search(
@@ -126,21 +134,9 @@ class HuggingFaceManager:
         self.log(f"Searching Hugging Face {repo_type}s for {query!r} sorted by {sort}.")
         try:
             if repo_type == "model":
-                items = self.api.list_models(
-                    search=query,
-                    sort=sort,
-                    limit=limit,
-                    full=True,
-                    token=self._token(),
-                )
+                items = self._list_models(query=query, sort=sort, limit=limit)
             else:
-                items = self.api.list_datasets(
-                    search=query,
-                    sort=sort,
-                    limit=limit,
-                    full=True,
-                    token=self._token(),
-                )
+                items = self._list_datasets(query=query, sort=sort, limit=limit)
             results = [self._result_from_info(item, repo_type) for item in items]
             if compatible_only:
                 results = [item for item in results if not item.blocked]
@@ -152,6 +148,7 @@ class HuggingFaceManager:
             return self.search_results
 
         with self._lock:
+            self.all_search_results = results
             self.search_results = results
             self.related_results = []
             self.selected_details = None
@@ -159,6 +156,52 @@ class HuggingFaceManager:
                 self.last_repo_id = results[0].repo_id
                 self.last_repo_type = repo_type
         self.log(f"Search returned {len(results)} {repo_type} result(s).")
+        return results
+
+    def sift_results(
+        self,
+        *,
+        text: str = "",
+        sort: str = "downloads",
+        format_filter: str = "any",
+        fit_filter: str = "any",
+        vram_limit_gb: float | None = None,
+    ) -> list[SearchResult]:
+        text = text.strip().lower()
+        sort = _normalize_local_sort(sort)
+        format_filter = format_filter or "any"
+        fit_filter = fit_filter or "any"
+        self.vram_limit_gb = vram_limit_gb if vram_limit_gb and vram_limit_gb > 0 else None
+        results = []
+        for item in self.all_search_results:
+            result = _with_fit(item, self.vram_limit_gb)
+            haystack = " ".join(
+                [
+                    result.repo_id,
+                    result.tags,
+                    result.pipeline,
+                    result.library,
+                    result.weights,
+                    result.quants,
+                    result.compatibility,
+                ]
+            ).lower()
+            if text and text not in haystack:
+                continue
+            if not _format_matches(result, format_filter):
+                continue
+            if fit_filter == "fits vram" and not result.fit.startswith("fits"):
+                continue
+            if fit_filter == "known size" and result.fit == "unknown":
+                continue
+            results.append(result)
+        results.sort(key=_sort_key(sort), reverse=sort not in {"repo", "updated_asc"})
+        with self._lock:
+            self.search_results = results
+            if results:
+                self.last_repo_id = results[0].repo_id
+                self.last_repo_type = results[0].repo_type
+        self.log(f"Sifted to {len(results)} result(s).")
         return results
 
     def inspect_repo(
@@ -195,8 +238,12 @@ class HuggingFaceManager:
         files = [_repo_file_from_sibling(item, repo_type) for item in _siblings(info)]
         if files:
             result.file_count = len(files)
-            if not result.size:
-                result.size = format_bytes(sum(item.size for item in files))
+            result.size_bytes = sum(item.size for item in files)
+            result.weight_bytes = _model_weight_bytes(repo_type, files)
+            result.size = format_bytes(result.size_bytes) if result.size_bytes else result.size
+            result.weights = _weight_summary_from_files(repo_type, files) or result.weights
+            result.quants = _quant_size_summary(files) or result.quants
+            result = _with_fit(result, self.vram_limit_gb)
         details = RepoDetails(result=result, files=files)
         with self._lock:
             self.selected_details = details
@@ -382,6 +429,8 @@ class HuggingFaceManager:
             base_models = [base_models]
         children_count = getattr(item, "children_model_count", None) or getattr(item, "childrenModelCount", None)
         size = _repo_size(item, siblings)
+        weight_bytes = _weight_bytes(repo_type, filenames, siblings, size)
+        params = _param_summary(item)
         return SearchResult(
             repo_id=repo_id,
             repo_type=repo_type,
@@ -397,9 +446,13 @@ class HuggingFaceManager:
             base_models=", ".join(str(model) for model in base_models[:3]),
             children="" if children_count is None else f"{children_count:,}",
             file_count=len(filenames),
+            size_bytes=size,
+            weight_bytes=weight_bytes,
+            params=params,
             role=classification["role"],
             weights=classification["weights"],
             quants=classification["quants"],
+            fit=_fit_label(weight_bytes, self.vram_limit_gb),
             compatibility=classification["compatibility"],
             blocked=classification["blocked"] == "true",
         )
@@ -407,18 +460,76 @@ class HuggingFaceManager:
     def _token(self) -> str | bool | None:
         return os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None
 
+    def _list_models(self, *, query: str, sort: str, limit: int) -> object:
+        try:
+            return self.api.list_models(
+                search=query,
+                sort=sort,
+                limit=limit,
+                expand=[
+                    "baseModels",
+                    "childrenModelCount",
+                    "downloads",
+                    "gated",
+                    "gguf",
+                    "lastModified",
+                    "library_name",
+                    "likes",
+                    "pipeline_tag",
+                    "safetensors",
+                    "sha",
+                    "siblings",
+                    "tags",
+                    "usedStorage",
+                ],
+                token=self._token(),
+            )
+        except Exception:
+            return self.api.list_models(
+                search=query,
+                sort=sort,
+                limit=limit,
+                full=True,
+                token=self._token(),
+            )
+
+    def _list_datasets(self, *, query: str, sort: str, limit: int) -> object:
+        try:
+            return self.api.list_datasets(
+                search=query,
+                sort=sort,
+                limit=limit,
+                expand=[
+                    "downloads",
+                    "gated",
+                    "lastModified",
+                    "likes",
+                    "sha",
+                    "siblings",
+                    "tags",
+                    "usedStorage",
+                ],
+                token=self._token(),
+            )
+        except Exception:
+            return self.api.list_datasets(
+                search=query,
+                sort=sort,
+                limit=limit,
+                full=True,
+                token=self._token(),
+            )
+
 
 def search_rows(results: list[SearchResult]) -> list[dict[str, str]]:
     if not results:
-        return [{"Repo": "No results yet", "Role": "", "Axolotl": "", "Size": "", "Files": "", "Quants": "", "Downloads": "", "Likes": ""}]
+        return [{"Repo": "No results yet", "Fit": "", "Weights / Quants": "", "Files": "", "Downloads": "", "Likes": "", "Updated": ""}]
     return [
         {
             "Repo": item.repo_id,
-            "Role": item.role,
-            "Axolotl": item.compatibility,
-            "Size": item.size,
+            "Fit": item.fit,
+            "Weights / Quants": _compact_size_cell(item),
             "Files": str(item.file_count or ""),
-            "Quants": item.quants,
             "Downloads": "" if item.downloads is None else f"{item.downloads:,}",
             "Likes": "" if item.likes is None else f"{item.likes:,}",
             "Updated": item.updated,
@@ -433,6 +544,22 @@ def result_options(results: list[SearchResult]) -> list[str]:
     return [result.repo_id for result in results]
 
 
+def result_link_markdown(results: list[SearchResult]) -> str:
+    if not results:
+        return "No results loaded."
+    lines = []
+    for index, item in enumerate(results[:20], start=1):
+        encoded = quote(item.repo_id, safe="")
+        href = _hf_url(item)
+        select_href = f"/hf/select/{item.repo_type}/{encoded}"
+        size = item.quants or item.weights or item.size or "inspect for sizes"
+        fit = item.fit or "fit unknown"
+        lines.append(
+            f"{index}. [{item.repo_id}]({href}) - [select]({select_href}) - {fit} - {size}"
+        )
+    return "\n".join(lines)
+
+
 def detail_summary_rows(details: RepoDetails | None) -> list[dict[str, str]]:
     if details is None:
         return [{"Field": "Selected", "Value": "No repository inspected yet"}]
@@ -440,11 +567,13 @@ def detail_summary_rows(details: RepoDetails | None) -> list[dict[str, str]]:
     rows = [
         ("Repo ID", result.repo_id),
         ("Type", result.repo_type),
-        ("Axolotl Role", result.role),
+        ("Use As", _use_as(result)),
         ("Compatibility", result.compatibility),
+        ("VRAM Fit", result.fit),
         ("Size", result.size),
+        ("Parameters", result.params),
         ("Weights / Files", result.weights),
-        ("Quants", result.quants),
+        ("Quant / Weight Sizes", result.quants),
         ("Pipeline", result.pipeline),
         ("Library", result.library),
         ("Base Models", result.base_models),
@@ -474,13 +603,12 @@ def detail_file_rows(details: RepoDetails | None) -> list[dict[str, str]]:
 
 def related_rows(results: list[SearchResult]) -> list[dict[str, str]]:
     if not results:
-        return [{"Repo": "No related fine-tunes loaded", "Role": "", "Axolotl": "", "Size": "", "Downloads": ""}]
+        return [{"Repo": "No related fine-tunes loaded", "Fit": "", "Weights / Quants": "", "Downloads": ""}]
     return [
         {
             "Repo": item.repo_id,
-            "Role": item.role,
-            "Axolotl": item.compatibility,
-            "Size": item.size,
+            "Fit": item.fit,
+            "Weights / Quants": _compact_size_cell(item),
             "Downloads": "" if item.downloads is None else f"{item.downloads:,}",
         }
         for item in results
@@ -491,9 +619,89 @@ def cache_summary_text(total_bytes: int, total_text: str) -> str:
     return total_text if total_text != "0B" else format_bytes(total_bytes)
 
 
+def _compact_size_cell(item: SearchResult) -> str:
+    return item.quants or item.weights or item.size or item.params or "inspect"
+
+
+def _hf_url(item: SearchResult) -> str:
+    prefix = "datasets/" if item.repo_type == "dataset" else ""
+    return f"https://huggingface.co/{prefix}{item.repo_id}"
+
+
+def _use_as(item: SearchResult) -> str:
+    if item.repo_type == "dataset":
+        return "dataset path"
+    if item.role == "peft_adapter":
+        return "lora_model_dir"
+    if item.role == "runtime_quant":
+        return "blocked runtime artifact"
+    return "base_model"
+
+
 def _normalize_sort(sort: str) -> str:
     value = (sort or "downloads").strip()
     return value if value in {"downloads", "likes", "last_modified", "trending_score"} else "downloads"
+
+
+def _normalize_local_sort(sort: str) -> str:
+    value = (sort or "downloads").strip()
+    return value if value in {"downloads", "likes", "repo", "updated", "updated_asc", "size", "fit"} else "downloads"
+
+
+def _sort_key(sort: str):
+    def key(item: SearchResult) -> object:
+        if sort == "likes":
+            return item.likes or 0
+        if sort == "repo":
+            return item.repo_id.lower()
+        if sort in {"updated", "updated_asc"}:
+            return item.updated
+        if sort == "size":
+            return item.weight_bytes or item.size_bytes
+        if sort == "fit":
+            return _fit_sort_value(item)
+        return item.downloads or 0
+
+    return key
+
+
+def _fit_sort_value(item: SearchResult) -> float:
+    if item.fit.startswith("fits"):
+        return 2.0
+    if item.fit.startswith("too large"):
+        return 0.0
+    return 1.0
+
+
+def _format_matches(item: SearchResult, format_filter: str) -> bool:
+    if format_filter == "any":
+        return True
+    haystack = f"{item.role} {item.weights} {item.quants} {item.compatibility}".lower()
+    if format_filter == "hf weights":
+        return any(token in haystack for token in ("safetensors", ".bin", ".pt", "hf weight"))
+    if format_filter == "adapters":
+        return "adapter" in haystack
+    if format_filter == "runtime quants":
+        return any(token in haystack for token in ("gguf", "runtime", "onnx", "exl2"))
+    if format_filter == "datasets":
+        return item.repo_type == "dataset"
+    return True
+
+
+def _with_fit(item: SearchResult, vram_limit_gb: float | None) -> SearchResult:
+    item.fit = _fit_label(item.weight_bytes or item.size_bytes, vram_limit_gb)
+    return item
+
+
+def _fit_label(size_bytes: int, vram_limit_gb: float | None) -> str:
+    if not vram_limit_gb:
+        return "set VRAM"
+    if size_bytes <= 0:
+        return "unknown"
+    limit = vram_limit_gb * BYTES_PER_GIB
+    if size_bytes <= limit:
+        return f"fits {vram_limit_gb:g}GB"
+    return f"too large for {vram_limit_gb:g}GB"
 
 
 def _allow_patterns(repo_type: RepoType) -> tuple[str, ...]:
@@ -534,15 +742,83 @@ def _repo_size(item: object, siblings: list[object]) -> int:
         value = getattr(item, attr, None)
         if isinstance(value, (int, float)):
             return int(value)
+    return sum(_sibling_size(sibling) for sibling in siblings)
+
+
+def _param_summary(item: object) -> str:
     safetensors = getattr(item, "safetensors", None)
     total = getattr(safetensors, "total", None)
-    if isinstance(total, (int, float)):
-        return int(total)
-    if isinstance(safetensors, dict):
+    if not isinstance(total, (int, float)) and isinstance(safetensors, dict):
         total = safetensors.get("total")
-        if isinstance(total, (int, float)):
-            return int(total)
-    return sum(_sibling_size(sibling) for sibling in siblings)
+    if not isinstance(total, (int, float)) or total <= 0:
+        return ""
+    return _format_params(int(total))
+
+
+def _format_params(value: int) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    return f"{value:,}"
+
+
+def _weight_bytes(repo_type: RepoType, filenames: list[str], siblings: list[object], repo_size: int) -> int:
+    if repo_type == "dataset":
+        return repo_size
+    total = 0
+    for filename, sibling in zip(filenames, siblings, strict=False):
+        lower = filename.lower()
+        if lower.endswith(MODEL_WEIGHT_SUFFIXES) or lower.endswith(RUNTIME_MODEL_SUFFIXES):
+            total += _sibling_size(sibling)
+    return total or repo_size
+
+
+def _model_weight_bytes(repo_type: RepoType, files: list[RepoFile]) -> int:
+    if repo_type == "dataset":
+        return sum(item.size for item in files if item.path.lower().endswith(DATASET_SUFFIXES))
+    return sum(
+        item.size
+        for item in files
+        if item.path.lower().endswith(MODEL_WEIGHT_SUFFIXES + RUNTIME_MODEL_SUFFIXES)
+    )
+
+
+def _weight_summary_from_files(repo_type: RepoType, files: list[RepoFile]) -> str:
+    if repo_type == "dataset":
+        count = sum(1 for item in files if item.path.lower().endswith(DATASET_SUFFIXES))
+        return f"{count} compatible data file(s)" if count else ""
+    hf_count = sum(1 for item in files if item.path.lower().endswith(MODEL_WEIGHT_SUFFIXES))
+    runtime_count = sum(1 for item in files if item.path.lower().endswith(RUNTIME_MODEL_SUFFIXES))
+    parts = []
+    if hf_count:
+        parts.append(f"{hf_count} HF weight file(s)")
+    if runtime_count:
+        parts.append(f"{runtime_count} runtime file(s)")
+    return ", ".join(parts)
+
+
+def _quant_size_summary(files: list[RepoFile]) -> str:
+    groups: dict[str, int] = {}
+    for item in files:
+        lower = item.path.lower()
+        if lower.endswith(".gguf"):
+            key = _gguf_quant_label(lower)
+        elif lower.endswith(".safetensors"):
+            key = "safetensors"
+        elif lower.endswith((".bin", ".pt")):
+            key = lower.rsplit(".", 1)[-1]
+        else:
+            continue
+        groups[key] = groups.get(key, 0) + item.size
+    if not groups:
+        return ""
+    return ", ".join(f"{key}: {format_bytes(value)}" for key, value in sorted(groups.items()))
+
+
+def _gguf_quant_label(filename: str) -> str:
+    match = re.search(r"\b(q[2-8](?:_[a-z0-9]+)*)\b", filename)
+    return match.group(1).upper() if match else "GGUF"
 
 
 def _classify_repo(repo_type: RepoType, repo_id: str, filenames: list[str], tags: list[object]) -> dict[str, str]:

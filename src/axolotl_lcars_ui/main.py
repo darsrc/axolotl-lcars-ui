@@ -10,6 +10,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
 import lcars_ui as lcars
 import uvicorn
@@ -23,6 +24,7 @@ from axolotl_lcars_ui.hf_manager import (
     detail_file_rows,
     detail_summary_rows,
     related_rows,
+    result_link_markdown,
     result_options,
     search_rows,
 )
@@ -82,7 +84,10 @@ CONFIG_GROUP_NOTES = {
 
 SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
 HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
+HF_LOCAL_SORT_OPTIONS = ["downloads", "likes", "fit", "size", "updated", "repo"]
 HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
+HF_FORMAT_FILTER_OPTIONS = ["any", "hf weights", "adapters", "runtime quants", "datasets"]
+HF_FIT_FILTER_OPTIONS = ["any", "known size", "fits vram"]
 HF_LIMIT_OPTIONS = ["12", "25", "50"]
 SETUP_FIELD_KEYS = {
     "strict",
@@ -458,47 +463,106 @@ def _resources_page() -> None:
 
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
-        with lcars.console("Hugging Face Browse / Download", color="lilac"):
-            with lcars.control_panel("Search And Acquire", color="lilac"):
-                _seed_text("hf-query", "llama instruct")
-                query = lcars.text_input("Search", placeholder="model or dataset query", autocomplete=False, id="hf-query")
-                repo_type = lcars.select("Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="hf-repo-type")
-                sort = lcars.select("Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
-                compatibility = lcars.select("Browse Filter", HF_COMPATIBILITY_OPTIONS, value=HF_COMPATIBILITY_OPTIONS[0], id="hf-compatibility")
-                limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
-                hf_options = result_options(STATE.hf.search_results)
-                result_choice = lcars.select(
-                    "Search Result",
-                    hf_options,
-                    value=STATE.hf.last_repo_id if STATE.hf.last_repo_id in hf_options else "",
-                    id="hf-result-select",
-                )
-                _seed_text("hf-repo-id", STATE.hf.last_repo_id)
-                repo_id = lcars.text_input("Selected Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
-                _seed_text("hf-revision", "")
-                revision = lcars.text_input("Revision", placeholder="optional branch/tag/commit", autocomplete=False, id="hf-revision")
-                if lcars.button("Search HF", color="anakiwa", id="hf-search"):
-                    _hf_search_action(query, repo_type, sort=sort, compatibility=compatibility, limit=limit)
-                if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
-                    _hf_select_result_action(result_choice, revision)
-                if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
-                    _hf_inspect_action(repo_id, repo_type, revision)
-                if lcars.button("Find Fine-Tunes", color="lilac", id="hf-related"):
-                    _hf_related_action(repo_id)
-                if lcars.button("Download Selected", color="golden-tanoi", id="hf-download"):
-                    _hf_download_action(repo_id, repo_type, revision)
-                if lcars.button("Use Repo In Config", color="tanoi", id="hf-use-repo"):
-                    _hf_use_repo_action(repo_id, repo_type)
-                if lcars.button("Use Last Local Snapshot", color="blue-bell", id="hf-use-local"):
-                    _hf_use_last_local_action(repo_type)
+        with lcars.control_panel("Search Command", color="lilac", zone="side"):
+            _seed_text("hf-query", "llama instruct")
+            query = lcars.text_input("Search", placeholder="model or dataset query", autocomplete=False, id="hf-query")
+            repo_type = lcars.select("Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="hf-repo-type")
+            sort = lcars.select("HF Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
+            compatibility = lcars.select("Browse Filter", HF_COMPATIBILITY_OPTIONS, value=HF_COMPATIBILITY_OPTIONS[0], id="hf-compatibility")
+            limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
+            vram_limit = lcars.number_input(
+                "VRAM Limit GB [filter]",
+                value=float(STATE.hf.vram_limit_gb or 24),
+                min=1,
+                max=256,
+                step=1,
+                id="hf-vram-limit",
+            )
 
-            with lcars.data_panel("Search Results", color="lilac"):
-                lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
-                lcars.table(detail_summary_rows(STATE.hf.selected_details), title="Selected Repo", id="hf-detail-table")
-                lcars.table(detail_file_rows(STATE.hf.selected_details), title="Compatible Files", id="hf-files-table")
-                lcars.table(related_rows(STATE.hf.related_results), title="Fine-Tunes / Related", id="hf-related-table")
-                lcars.table(STATE.hf.job_rows(), title="Download Jobs", id="hf-jobs-table")
-                lcars.log(LOG_HF, max_lines=300, title="HF Activity")
+        with lcars.control_panel("Sift Current Results", color="blue-bell", zone="side"):
+            _seed_text("hf-sift", "")
+            sift = lcars.text_input("Contains [optional]", placeholder="repo, tag, quant, family", autocomplete=False, id="hf-sift")
+            local_sort = lcars.select("Result Sort", HF_LOCAL_SORT_OPTIONS, value="downloads", id="hf-local-sort")
+            format_filter = lcars.select("Format", HF_FORMAT_FILTER_OPTIONS, value="any", id="hf-format-filter")
+            fit_filter = lcars.select("VRAM Fit", HF_FIT_FILTER_OPTIONS, value="any", id="hf-fit-filter")
+
+        with lcars.data_panel("Search Results", color="lilac", zone="primary"):
+            lcars.markdown(result_link_markdown(STATE.hf.search_results), id="hf-results-links")
+            lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
+
+        with lcars.data_panel("Selected Repository", color="anakiwa", zone="dock"):
+            hf_options = result_options(STATE.hf.search_results)
+            result_choice = lcars.select(
+                "Search Result",
+                hf_options,
+                value=STATE.hf.last_repo_id if STATE.hf.last_repo_id in hf_options else "",
+                id="hf-result-select",
+            )
+            _seed_text("hf-repo-id", STATE.hf.last_repo_id)
+            repo_id = lcars.text_input("Copy Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
+            _seed_text("hf-revision", "")
+            revision = lcars.text_input("Revision [optional]", placeholder="branch/tag/commit", autocomplete=False, id="hf-revision")
+            lcars.markdown(_hf_selected_markdown(repo_id, repo_type), id="hf-selected-link")
+
+        with lcars.data_panel("Repo Intelligence", color="blue-bell", zone="dock"):
+            lcars.table(detail_summary_rows(STATE.hf.selected_details), title="Selected Repo", id="hf-detail-table")
+            lcars.table(detail_file_rows(STATE.hf.selected_details), title="Compatible / Quant Files", id="hf-files-table")
+
+        with lcars.data_panel("Fine-Tunes / Related", color="pale-canary", zone="dock"):
+            lcars.table(related_rows(STATE.hf.related_results), title="Related Models", id="hf-related-table")
+
+        with lcars.data_panel("Transfers", color="golden-tanoi", zone="dock"):
+            lcars.table(STATE.hf.job_rows(), title="Download Jobs", id="hf-jobs-table")
+            lcars.log(LOG_HF, max_lines=300, title="HF Activity")
+
+        with lcars.control_panel("Search", color="anakiwa", zone="dock"):
+            if lcars.button("Run Search", color="anakiwa", id="hf-search"):
+                _hf_search_action(
+                    query,
+                    repo_type,
+                    sort=sort,
+                    compatibility=compatibility,
+                    limit=limit,
+                    sift=sift,
+                    local_sort=local_sort,
+                    format_filter=format_filter,
+                    fit_filter=fit_filter,
+                    vram_limit=vram_limit,
+                )
+
+        with lcars.control_panel("Sift", color="blue-bell", zone="dock"):
+            if lcars.button("Apply Sift", color="blue-bell", id="hf-apply-sift"):
+                _hf_sift_action(
+                    sift=sift,
+                    local_sort=local_sort,
+                    format_filter=format_filter,
+                    fit_filter=fit_filter,
+                    vram_limit=vram_limit,
+                )
+
+        with lcars.control_panel("Select", color="lilac", zone="dock"):
+            if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
+                _hf_select_result_action(result_choice, revision)
+
+        with lcars.control_panel("Inspect", color="anakiwa", zone="dock"):
+            if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
+                _hf_inspect_action(repo_id, repo_type, revision)
+
+        with lcars.control_panel("Lineage", color="pale-canary", zone="dock"):
+            if lcars.button("Find Fine-Tunes", color="lilac", id="hf-related"):
+                _hf_related_action(repo_id)
+
+        with lcars.control_panel("Acquire", color="golden-tanoi", zone="dock"):
+            if lcars.button("Download Selected", color="golden-tanoi", id="hf-download"):
+                _hf_download_action(repo_id, repo_type, revision)
+
+        with lcars.control_panel("Use", color="tanoi", zone="dock"):
+            if lcars.button("Use Repo In Config", color="tanoi", id="hf-use-repo"):
+                _hf_use_repo_action(repo_id, repo_type)
+
+        with lcars.control_panel("Local", color="blue-bell", zone="dock"):
+            if lcars.button("Use Last Local Snapshot", color="blue-bell", id="hf-use-local"):
+                _hf_use_last_local_action(repo_type)
 
 
 def _content_page() -> None:
@@ -582,6 +646,14 @@ def _storage_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
     output_dir = str(cfg.get("output_dir") or "")
     prepared_path = str(cfg.get("dataset_prepared_path") or "")
     return storage_hotspot_rows(PROJECT_ROOT, output_dir=output_dir, prepared_path=prepared_path)
+
+
+def _hf_selected_markdown(repo_id: str, repo_type: str) -> str:
+    repo_id = repo_id.strip()
+    if not repo_id:
+        return "No repository selected."
+    prefix = "datasets/" if repo_type == "dataset" else ""
+    return f"[Open on Hugging Face](https://huggingface.co/{prefix}{repo_id})"
 
 
 def _ollama_rule_rows() -> list[dict[str, str]]:
@@ -853,16 +925,50 @@ def _hf_search_action(
     sort: str = "downloads",
     compatibility: str = HF_COMPATIBILITY_OPTIONS[0],
     limit: str = "12",
+    sift: str = "",
+    local_sort: str = "downloads",
+    format_filter: str = "any",
+    fit_filter: str = "any",
+    vram_limit: float | int | str = 0,
 ) -> None:
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
+    vram = _optional_float(vram_limit)
     results = STATE.hf.search(
         query,
         repo_type,  # type: ignore[arg-type]
         sort=sort,
         compatible_only=compatibility == HF_COMPATIBILITY_OPTIONS[0],
         limit=_bounded_int(limit, default=12, minimum=1, maximum=50),
+    )
+    results = STATE.hf.sift_results(
+        text=sift,
+        sort=local_sort,
+        format_filter=format_filter,
+        fit_filter=fit_filter,
+        vram_limit_gb=vram,
+    )
+    _update_hf_widgets()
+    if results:
+        _set_widget_value("hf-repo-id", results[0].repo_id)
+    _append_hf_logs()
+
+
+def _hf_sift_action(
+    *,
+    sift: str,
+    local_sort: str,
+    format_filter: str,
+    fit_filter: str,
+    vram_limit: float | int | str,
+) -> None:
+    results = STATE.hf.sift_results(
+        text=sift,
+        sort=local_sort,
+        format_filter=format_filter,
+        fit_filter=fit_filter,
+        vram_limit_gb=_optional_float(vram_limit),
     )
     _update_hf_widgets()
     if results:
@@ -1080,11 +1186,13 @@ def _update_hf_widgets() -> None:
     selected_options = result_options(STATE.hf.search_results)
     selected_value = STATE.hf.last_repo_id if STATE.hf.last_repo_id in selected_options else selected_options[0]
     lcars.update("hf-results-table", **_table_payload(search_rows(STATE.hf.search_results)))
+    lcars.update("hf-results-links", content=result_link_markdown(STATE.hf.search_results))
     lcars.update("hf-detail-table", **_table_payload(detail_summary_rows(STATE.hf.selected_details)))
     lcars.update("hf-files-table", **_table_payload(detail_file_rows(STATE.hf.selected_details)))
     lcars.update("hf-related-table", **_table_payload(related_rows(STATE.hf.related_results)))
     lcars.update("hf-jobs-table", **_table_payload(STATE.hf.job_rows()))
     lcars.update("hf-result-select", options=_select_options(selected_options), value=selected_value)
+    lcars.update("hf-selected-link", content=_hf_selected_markdown(STATE.hf.last_repo_id, STATE.hf.last_repo_type))
 
 
 def _update_cache_widgets(*, live: bool = False) -> None:
@@ -1173,8 +1281,22 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
 
         app.state._live_coro_factory = _live_loop
 
+    _install_hf_routes(app)
     _install_raw_editor(app)
     return app
+
+
+def _install_hf_routes(app: FastAPI) -> None:
+    @app.get("/hf/select/{repo_type}/{repo_id:path}", include_in_schema=False)
+    def hf_select(repo_type: str, repo_id: str) -> RedirectResponse:
+        repo_id = unquote(repo_id).strip()
+        if repo_type in {"model", "dataset"} and repo_id:
+            result = STATE.hf.select_result(repo_id)
+            selected_type = result.repo_type if result is not None else repo_type
+            STATE.hf.inspect_repo(repo_id, selected_type)  # type: ignore[arg-type]
+        return RedirectResponse("/?page=hub")
+
+    _move_last_route_before_spa(app)
 
 
 def _install_raw_editor(app: FastAPI) -> None:
@@ -1328,6 +1450,14 @@ def _bounded_int(value: str, *, default: int, minimum: int, maximum: int) -> int
     except ValueError:
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def _optional_float(value: float | int | str) -> float | None:
+    try:
+        parsed = float(str(value).strip())
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _series_payload(data: dict[str, list[float]]) -> list[dict[str, Any]]:
