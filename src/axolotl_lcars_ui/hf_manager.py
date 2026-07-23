@@ -800,12 +800,12 @@ def _use_as(item: SearchResult) -> str:
 
 
 def _normalize_sort(sort: str) -> str:
-    value = (sort or "downloads").strip()
+    value = (sort or "downloads").strip().lower()
     return value if value in {"downloads", "likes", "last_modified", "trending_score"} else "downloads"
 
 
 def _normalize_local_sort(sort: str) -> str:
-    value = (sort or "downloads").strip()
+    value = (sort or "downloads").strip().lower()
     return value if value in {"downloads", "likes", "repo", "updated", "updated_asc", "size", "fit"} else "downloads"
 
 

@@ -83,7 +83,7 @@ CONFIG_GROUP_NOTES = {
 
 SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
 HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
-HF_LOCAL_SORT_OPTIONS = ["downloads", "likes", "fit", "size", "updated", "repo"]
+HF_LOCAL_SORT_OPTIONS = ["downloads", "likes", "updated", "repo", "size"]
 HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
 HF_ARTIFACT_FILTER_OPTIONS = ["any artifact", "base/trainable models", "PEFT adapters", "datasets", "runtime only"]
 HF_QUANT_FILTER_OPTIONS = [
@@ -473,16 +473,6 @@ def _resources_page() -> None:
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
         with lcars.data_panel("Search Results", color="lilac", zone="primary"):
-            if lcars.button("Repo", color="lilac", id="hf-sort-repo"):
-                _hf_sort_action("repo")
-            if lcars.button("Downloads", color="anakiwa", id="hf-sort-downloads"):
-                _hf_sort_action("downloads")
-            if lcars.button("Likes", color="blue-bell", id="hf-sort-likes"):
-                _hf_sort_action("likes")
-            if lcars.button("Updated", color="pale-canary", id="hf-sort-updated"):
-                _hf_sort_action("updated")
-            if lcars.button("Size", color="golden-tanoi", id="hf-sort-size"):
-                _hf_sort_action("size")
             lcars.markdown(result_link_markdown(STATE.hf.search_results, STATE.hf.selected_details), id="hf-results-links")
 
         with lcars.control_panel("Search Controls", color="lilac", zone="side", id="search-command"):
@@ -531,6 +521,8 @@ def _hub_page() -> None:
             _seed_text("hf-sift", "")
             sift = lcars.text_input("Contains [optional]", placeholder="repo, tag, quant, family", autocomplete=False, id="hf-sift")
             local_sort = lcars.select("Result Sort", HF_LOCAL_SORT_OPTIONS, value="downloads", id="hf-local-sort")
+            if _is_active_action("hf-local-sort"):
+                _hf_sort_action(local_sort)
             artifact_filter = lcars.select("Artifact", HF_ARTIFACT_FILTER_OPTIONS, value=HF_ARTIFACT_FILTER_OPTIONS[0], id="hf-artifact-filter")
             quant_filter = lcars.select("Weight Format", HF_QUANT_FILTER_OPTIONS, value=HF_QUANT_FILTER_OPTIONS[0], id="hf-quant-filter")
             fit_filter = lcars.select("VRAM Fit", HF_FIT_FILTER_OPTIONS, value="any", id="hf-fit-filter")
