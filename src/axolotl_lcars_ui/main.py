@@ -473,6 +473,16 @@ def _resources_page() -> None:
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
         with lcars.data_panel("Search Results", color="lilac", zone="primary"):
+            if lcars.button("Repo", color="lilac", id="hf-sort-repo"):
+                _hf_sort_action("repo")
+            if lcars.button("Downloads", color="anakiwa", id="hf-sort-downloads"):
+                _hf_sort_action("downloads")
+            if lcars.button("Likes", color="blue-bell", id="hf-sort-likes"):
+                _hf_sort_action("likes")
+            if lcars.button("Updated", color="pale-canary", id="hf-sort-updated"):
+                _hf_sort_action("updated")
+            if lcars.button("Size", color="golden-tanoi", id="hf-sort-size"):
+                _hf_sort_action("size")
             lcars.markdown(result_link_markdown(STATE.hf.search_results, STATE.hf.selected_details), id="hf-results-links")
 
         with lcars.control_panel("Search Controls", color="lilac", zone="side", id="search-command"):
@@ -1024,6 +1034,14 @@ def _hf_related_action(repo_id: str) -> None:
     _append_hf_logs()
 
 
+def _hf_sort_action(sort_key: str) -> None:
+    STATE.hf.sort_current_results(sort_key)
+    if STATE.hf.search_results:
+        _set_widget_value("hf-repo-id", STATE.hf.search_results[0].repo_id)
+    _update_hf_widgets()
+    _append_hf_logs()
+
+
 def _hf_download_action(repo_id: str, repo_type: str, revision: str) -> None:
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
@@ -1304,14 +1322,6 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
 
 
 def _install_hf_routes(app: FastAPI, ui_fn: Callable[[], None], config: Any) -> None:
-    @app.get("/hf/sort/{sort_key}", include_in_schema=False)
-    def hf_sort(sort_key: str) -> RedirectResponse:
-        STATE.hf.sort_current_results(sort_key)
-        _refresh_manifest(app, ui_fn, config)
-        return RedirectResponse("/?page=hub")
-
-    _move_last_route_before_spa(app)
-
     @app.get("/hf/select/{repo_type}/{repo_id:path}", include_in_schema=False)
     def hf_select(repo_type: str, repo_id: str) -> RedirectResponse:
         repo_id = unquote(repo_id).strip()

@@ -674,7 +674,7 @@ def result_options(results: list[SearchResult]) -> list[str]:
 
 def result_link_markdown(results: list[SearchResult], details: RepoDetails | None = None) -> str:
     lines = [
-        "| [Repo](/hf/sort/repo) | Fit | Weights / Quants | Files | [Downloads](/hf/sort/downloads) | [Likes](/hf/sort/likes) | [Updated](/hf/sort/updated) |",
+        "| Repo | Fit | Weights / Quants | Files | Downloads | Likes | Updated |",
         "| --- | --- | --- | ---: | ---: | ---: | --- |",
     ]
     if not results:
