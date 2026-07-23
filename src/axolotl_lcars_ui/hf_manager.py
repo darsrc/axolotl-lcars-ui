@@ -680,13 +680,11 @@ def result_link_markdown(results: list[SearchResult], details: RepoDetails | Non
     if not results:
         lines.append("| No results loaded |  |  |  |  |  |  |")
     for index, item in enumerate(results[:20], start=1):
-        encoded = quote(item.repo_id, safe="")
-        select_href = f"/hf/select/{item.repo_type}/{encoded}"
         size = item.quants or item.weights or item.size or "inspect for sizes"
         fit = item.fit or "fit unknown"
         hf_path = _hf_path(item)
         lines.append(
-            f"| {index}. [{item.repo_id}]({select_href})<br>`{hf_path}` | {fit} | {size} | "
+            f"| {index}. `{item.repo_id}`<br>`{hf_path}` | {fit} | {size} | "
             f"{item.file_count or ''} | {'' if item.downloads is None else f'{item.downloads:,}'} | "
             f"{'' if item.likes is None else f'{item.likes:,}'} | {item.updated} |"
         )

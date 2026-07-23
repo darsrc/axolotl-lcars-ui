@@ -557,6 +557,8 @@ def _hub_page() -> None:
             repo_id = lcars.text_input("Copy Repo ID", placeholder="owner/name", autocomplete=False, id="hf-repo-id")
             _seed_text("hf-revision", "")
             revision = lcars.text_input("Revision [optional]", placeholder="branch/tag/commit", autocomplete=False, id="hf-revision")
+            if _is_active_action("hf-result-select"):
+                _hf_select_result_action(result_choice, revision)
             if lcars.button("Select Result", color="blue-bell", id="hf-select-result"):
                 _hf_select_result_action(result_choice, revision)
             if lcars.button("Inspect Repo", color="anakiwa", id="hf-inspect"):
