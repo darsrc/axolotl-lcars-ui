@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
+import shutil
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
 from huggingface_hub import HfApi, scan_cache_dir, snapshot_download
+from huggingface_hub.constants import HF_HUB_CACHE
 
 from axolotl_lcars_ui.resources import format_bytes
 
@@ -44,6 +48,11 @@ MODEL_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
 RUNTIME_MODEL_SUFFIXES = (".gguf", ".onnx", ".engine", ".tflite", ".mlx")
 DATASET_SUFFIXES = (".json", ".jsonl", ".parquet", ".csv", ".arrow", ".txt")
 BYTES_PER_GIB = 1024**3
+DOWNLOAD_SPACE_BUFFER = 1.1
+MODEL_SUPPORT_DOWNLOAD_ALLOW = tuple(
+    pattern for pattern in MODEL_DOWNLOAD_ALLOW if pattern not in {"*.safetensors", "*.bin", "*.pt"}
+)
+DATASET_SUPPORT_DOWNLOAD_ALLOW = ("*.py", "*.md")
 
 
 @dataclass
@@ -98,6 +107,8 @@ class DownloadJob:
     ended_at: float | None = None
     local_path: str = ""
     error: str = ""
+    allow_patterns: tuple[str, ...] = field(default_factory=tuple)
+    estimated_bytes: int = 0
 
 
 class HuggingFaceManager:
@@ -115,6 +126,7 @@ class HuggingFaceManager:
         self.last_repo_type: RepoType = "model"
         self.last_local_path = ""
         self.vram_limit_gb: float | None = None
+        self.max_concurrent_downloads = _download_concurrency()
         self._lock = threading.Lock()
 
     def search(
@@ -207,6 +219,17 @@ class HuggingFaceManager:
                 self.last_repo_type = results[0].repo_type
         self.log(f"Sifted to {len(results)} result(s).")
         return results
+
+    def sort_current_results(self, sort: str) -> list[SearchResult]:
+        sort = _normalize_local_sort(sort)
+        with self._lock:
+            self.search_results = sorted(
+                self.search_results,
+                key=_sort_key(sort),
+                reverse=sort not in {"repo", "updated_asc"},
+            )
+        self.log(f"Sorted current results by {sort}.")
+        return self.search_results
 
     def inspect_repo(
         self,
@@ -315,20 +338,72 @@ class HuggingFaceManager:
         repo_type: RepoType,
         *,
         revision: str | None = None,
+        allow_patterns: tuple[str, ...] | None = None,
+        estimated_bytes: int | None = None,
     ) -> DownloadJob:
         repo_id = repo_id.strip()
         if not repo_id:
             raise ValueError("Repo ID is required.")
-        job_id = f"{repo_type}:{repo_id}:{int(time.time())}"
-        job = DownloadJob(job_id=job_id, repo_id=repo_id, repo_type=repo_type, revision=revision)
+        patterns = tuple(allow_patterns or _allow_patterns(repo_type))
+        if estimated_bytes is None:
+            estimated_bytes = self.estimate_download_size(repo_id, repo_type, allow_patterns=patterns)
+        self._assert_download_space(estimated_bytes)
+        job_id = f"{repo_type}:{repo_id}:{time.time_ns()}"
+        job = DownloadJob(
+            job_id=job_id,
+            repo_id=repo_id,
+            repo_type=repo_type,
+            revision=revision,
+            allow_patterns=patterns,
+            estimated_bytes=estimated_bytes,
+        )
         with self._lock:
             self.jobs[job_id] = job
             self.last_repo_id = repo_id
             self.last_repo_type = repo_type
-        thread = threading.Thread(target=self._download_worker, args=(job_id,), daemon=True)
-        thread.start()
-        self.log(f"Queued HF download: {repo_type} {repo_id}.")
+            self._start_queued_downloads_locked()
+        estimate = f" estimated {format_bytes(estimated_bytes)}" if estimated_bytes else " size unknown"
+        self.log(f"Queued HF download: {repo_type} {repo_id};{estimate}.")
         return job
+
+    def start_file_download(
+        self,
+        repo_id: str,
+        repo_type: RepoType,
+        file_path: str,
+        *,
+        revision: str | None = None,
+    ) -> DownloadJob:
+        repo_id = repo_id.strip()
+        file_path = file_path.strip()
+        if not repo_id or not file_path:
+            raise ValueError("Repo ID and file path are required.")
+        details = self._details_for_download(repo_id, repo_type, revision=revision)
+        selected = next((item for item in details.files if item.path == file_path), None)
+        if selected is None:
+            raise ValueError(f"{file_path} was not found in {repo_id}.")
+        if selected.axolotl == "skip":
+            raise ValueError(f"{file_path} is a runtime/unsupported artifact and is not queued for Axolotl.")
+        patterns = _file_download_patterns(repo_type, selected.path)
+        estimated = _estimate_from_files(details.files, patterns)
+        return self.start_download(
+            repo_id,
+            repo_type,
+            revision=revision,
+            allow_patterns=patterns,
+            estimated_bytes=estimated,
+        )
+
+    def estimate_download_size(
+        self,
+        repo_id: str,
+        repo_type: RepoType,
+        *,
+        allow_patterns: tuple[str, ...],
+        revision: str | None = None,
+    ) -> int:
+        details = self._details_for_download(repo_id, repo_type, revision=revision)
+        return _estimate_from_files(details.files, allow_patterns)
 
     def cache_rows(self) -> tuple[list[dict[str, str]], str, int]:
         try:
@@ -380,6 +455,7 @@ class HuggingFaceManager:
                 "Type": job.repo_type,
                 "Status": job.status,
                 "Revision": job.revision or "main",
+                "Estimate": format_bytes(job.estimated_bytes) if job.estimated_bytes else "unknown",
                 "Local Path": job.local_path or job.error,
             }
             for job in jobs[:8]
@@ -394,16 +470,16 @@ class HuggingFaceManager:
         self.logs.append(f"[HF] {message}")
 
     def _download_worker(self, job_id: str) -> None:
-        with self._lock:
-            job = self.jobs[job_id]
-            job.status = "running"
+        job = self.jobs[job_id]
         try:
+            if job.estimated_bytes:
+                self._assert_download_space(job.estimated_bytes, include_existing_reservations=False)
             token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
             local_path = snapshot_download(
                 repo_id=job.repo_id,
                 repo_type=job.repo_type,
                 revision=job.revision or None,
-                allow_patterns=_allow_patterns(job.repo_type),
+                allow_patterns=job.allow_patterns or _allow_patterns(job.repo_type),
                 token=token or None,
             )
         except Exception as exc:
@@ -411,6 +487,7 @@ class HuggingFaceManager:
                 job.status = "failed"
                 job.error = str(exc)
                 job.ended_at = time.time()
+                self._start_queued_downloads_locked()
             self.log(f"Download failed for {job.repo_type} {job.repo_id}: {exc}")
             return
 
@@ -419,7 +496,50 @@ class HuggingFaceManager:
             job.local_path = local_path
             job.ended_at = time.time()
             self.last_local_path = local_path
+            self._start_queued_downloads_locked()
         self.log(f"Download complete for {job.repo_type} {job.repo_id}: {local_path}")
+
+    def _details_for_download(self, repo_id: str, repo_type: RepoType, *, revision: str | None = None) -> RepoDetails:
+        if self.selected_details and self.selected_details.result.repo_id == repo_id and self.selected_details.result.repo_type == repo_type:
+            return self.selected_details
+        details = self.inspect_repo(repo_id, repo_type, revision=revision)
+        if details is None:
+            raise ValueError(f"Could not inspect {repo_type} {repo_id} before queueing download.")
+        return details
+
+    def _assert_download_space(self, estimated_bytes: int, *, include_existing_reservations: bool = True) -> None:
+        if estimated_bytes <= 0:
+            self.log("Download size is unknown; disk-space check is advisory only.")
+            return
+        cache_dir = _cache_dir()
+        free = shutil.disk_usage(cache_dir).free
+        required = _space_required(estimated_bytes)
+        if include_existing_reservations:
+            with self._lock:
+                required += sum(
+                    _space_required(job.estimated_bytes)
+                    for job in self.jobs.values()
+                    if job.status in {"queued", "running"} and job.estimated_bytes > 0
+                )
+        if free < required:
+            raise ValueError(
+                f"Not enough free space in HF cache {cache_dir}: need {format_bytes(required)}, "
+                f"available {format_bytes(free)}."
+            )
+
+    def _start_queued_downloads_locked(self) -> None:
+        running = sum(1 for job in self.jobs.values() if job.status == "running")
+        slots = max(0, self.max_concurrent_downloads - running)
+        if slots <= 0:
+            return
+        queued = sorted(
+            (job for job in self.jobs.values() if job.status == "queued"),
+            key=lambda job: job.started_at,
+        )
+        for job in queued[:slots]:
+            job.status = "running"
+            thread = threading.Thread(target=self._download_worker, args=(job.job_id,), daemon=True)
+            thread.start()
 
     def _result_from_info(self, item: object, repo_type: RepoType) -> SearchResult:
         repo_id = str(getattr(item, "id", "") or getattr(item, "repo_id", ""))
@@ -552,10 +672,13 @@ def result_options(results: list[SearchResult]) -> list[str]:
     return [result.repo_id for result in results]
 
 
-def result_link_markdown(results: list[SearchResult]) -> str:
+def result_link_markdown(results: list[SearchResult], details: RepoDetails | None = None) -> str:
+    lines = [
+        "| [Repo](/hf/sort/repo) | Fit | Weights / Quants | Files | [Downloads](/hf/sort/downloads) | [Likes](/hf/sort/likes) | [Updated](/hf/sort/updated) |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+    ]
     if not results:
-        return "No results loaded."
-    lines = []
+        lines.append("| No results loaded |  |  |  |  |  |  |")
     for index, item in enumerate(results[:20], start=1):
         encoded = quote(item.repo_id, safe="")
         select_href = f"/hf/select/{item.repo_type}/{encoded}"
@@ -563,9 +686,39 @@ def result_link_markdown(results: list[SearchResult]) -> str:
         fit = item.fit or "fit unknown"
         hf_path = _hf_path(item)
         lines.append(
-            f"{index}. [{item.repo_id}]({select_href}) - {fit} - {size} - `{hf_path}`"
+            f"| {index}. [{item.repo_id}]({select_href})<br>`{hf_path}` | {fit} | {size} | "
+            f"{item.file_count or ''} | {'' if item.downloads is None else f'{item.downloads:,}'} | "
+            f"{'' if item.likes is None else f'{item.likes:,}'} | {item.updated} |"
         )
+        if details and details.result.repo_id == item.repo_id and details.result.repo_type == item.repo_type:
+            lines.extend(_expanded_repo_markdown(details))
+    if details and not any(item.repo_id == details.result.repo_id and item.repo_type == details.result.repo_type for item in results):
+        lines.append("")
+        lines.append(f"**Expanded selection:** `{details.result.repo_id}`")
+        lines.extend(_expanded_repo_markdown(details))
     return "\n".join(lines)
+
+
+def _expanded_repo_markdown(details: RepoDetails) -> list[str]:
+    result = details.result
+    lines = [
+        "",
+        f"**Expanded:** `{result.repo_id}` - {result.compatibility}",
+        "",
+        "| File / Quant | Size | Kind | Axolotl | Queue |",
+        "| --- | ---: | --- | --- | --- |",
+    ]
+    files = sorted(details.files, key=lambda item: (item.axolotl == "skip", item.kind, item.path.lower()))
+    for item in files[:40]:
+        encoded_repo = quote(result.repo_id, safe="")
+        encoded_file = quote(item.path, safe="")
+        queue = "blocked" if item.axolotl == "skip" else f"[queue](/hf/download-file/{result.repo_type}/{encoded_repo}?file={encoded_file})"
+        lines.append(
+            f"| `{item.path}` | {format_bytes(item.size) if item.size else 'unknown'} | {item.kind} | {item.axolotl} | {queue} |"
+        )
+    if len(files) > 40:
+        lines.append(f"| ... {len(files) - 40} more file(s) |  |  |  | inspect via Selection panel |")
+    return lines
 
 
 def detail_summary_rows(details: RepoDetails | None) -> list[dict[str, str]]:
@@ -743,6 +896,40 @@ def _fit_label(size_bytes: int, vram_limit_gb: float | None) -> str:
 
 def _allow_patterns(repo_type: RepoType) -> tuple[str, ...]:
     return MODEL_DOWNLOAD_ALLOW if repo_type == "model" else DATASET_DOWNLOAD_ALLOW
+
+
+def _file_download_patterns(repo_type: RepoType, file_path: str) -> tuple[str, ...]:
+    if repo_type == "dataset":
+        return (*DATASET_SUPPORT_DOWNLOAD_ALLOW, file_path)
+    return (*MODEL_SUPPORT_DOWNLOAD_ALLOW, file_path)
+
+
+def _estimate_from_files(files: list[RepoFile], allow_patterns: tuple[str, ...]) -> int:
+    return sum(item.size for item in files if _pattern_allowed(item.path, allow_patterns))
+
+
+def _pattern_allowed(path: str, allow_patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in allow_patterns)
+
+
+def _cache_dir() -> Path:
+    raw = os.getenv("HF_HUB_CACHE") or os.getenv("HUGGINGFACE_HUB_CACHE") or HF_HUB_CACHE
+    path = Path(raw).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _space_required(estimated_bytes: int) -> int:
+    return int(estimated_bytes * DOWNLOAD_SPACE_BUFFER)
+
+
+def _download_concurrency() -> int:
+    raw = os.getenv("HF_MAX_CONCURRENT_DOWNLOADS", "2")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 2
+    return max(1, min(value, 8))
 
 
 def _siblings(item: object) -> list[object]:

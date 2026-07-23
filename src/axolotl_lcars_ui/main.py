@@ -26,7 +26,6 @@ from axolotl_lcars_ui.hf_manager import (
     related_rows,
     result_link_markdown,
     result_options,
-    search_rows,
 )
 from axolotl_lcars_ui.ollama import OllamaManager
 from axolotl_lcars_ui.resources import (
@@ -474,8 +473,7 @@ def _resources_page() -> None:
 def _hub_page() -> None:
     with lcars.page("HF Hub", id="hub", layout="console"):
         with lcars.data_panel("Search Results", color="lilac", zone="primary"):
-            lcars.markdown(result_link_markdown(STATE.hf.search_results), id="hf-results-links")
-            lcars.table(search_rows(STATE.hf.search_results), title="HF Results", id="hf-results-table")
+            lcars.markdown(result_link_markdown(STATE.hf.search_results, STATE.hf.selected_details), id="hf-results-links")
 
         with lcars.control_panel("Search Controls", color="lilac", zone="side", id="search-command"):
             _seed_text("hf-query", "llama instruct")
@@ -1205,8 +1203,7 @@ def _update_config_widgets() -> None:
 def _update_hf_widgets() -> None:
     selected_options = result_options(STATE.hf.search_results)
     selected_value = STATE.hf.last_repo_id if STATE.hf.last_repo_id in selected_options else selected_options[0]
-    lcars.update("hf-results-table", **_table_payload(search_rows(STATE.hf.search_results)))
-    lcars.update("hf-results-links", content=result_link_markdown(STATE.hf.search_results))
+    lcars.update("hf-results-links", content=result_link_markdown(STATE.hf.search_results, STATE.hf.selected_details))
     lcars.update("hf-detail-table", **_table_payload(detail_summary_rows(STATE.hf.selected_details)))
     lcars.update("hf-files-table", **_table_payload(detail_file_rows(STATE.hf.selected_details)))
     lcars.update("hf-related-table", **_table_payload(related_rows(STATE.hf.related_results)))
@@ -1307,6 +1304,14 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
 
 
 def _install_hf_routes(app: FastAPI, ui_fn: Callable[[], None], config: Any) -> None:
+    @app.get("/hf/sort/{sort_key}", include_in_schema=False)
+    def hf_sort(sort_key: str) -> RedirectResponse:
+        STATE.hf.sort_current_results(sort_key)
+        _refresh_manifest(app, ui_fn, config)
+        return RedirectResponse("/?page=hub")
+
+    _move_last_route_before_spa(app)
+
     @app.get("/hf/select/{repo_type}/{repo_id:path}", include_in_schema=False)
     def hf_select(repo_type: str, repo_id: str) -> RedirectResponse:
         repo_id = unquote(repo_id).strip()
@@ -1314,6 +1319,20 @@ def _install_hf_routes(app: FastAPI, ui_fn: Callable[[], None], config: Any) -> 
             result = STATE.hf.select_result(repo_id)
             selected_type = result.repo_type if result is not None else repo_type
             STATE.hf.inspect_repo(repo_id, selected_type)  # type: ignore[arg-type]
+            _refresh_manifest(app, ui_fn, config)
+        return RedirectResponse("/?page=hub")
+
+    _move_last_route_before_spa(app)
+
+    @app.get("/hf/download-file/{repo_type}/{repo_id:path}", include_in_schema=False)
+    def hf_download_file(repo_type: str, repo_id: str, file: str = "") -> RedirectResponse:
+        repo_id = unquote(repo_id).strip()
+        file_path = unquote(file).strip()
+        if repo_type in {"model", "dataset"} and repo_id and file_path:
+            try:
+                STATE.hf.start_file_download(repo_id, repo_type, file_path)  # type: ignore[arg-type]
+            except Exception as exc:
+                STATE.hf.log(f"File download not queued for {repo_id}: {exc}")
             _refresh_manifest(app, ui_fn, config)
         return RedirectResponse("/?page=hub")
 
