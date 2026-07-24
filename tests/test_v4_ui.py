@@ -48,17 +48,37 @@ def _manifest_widgets(manifest: object) -> dict[str, object]:
     return widgets
 
 
-class V4UiTests(unittest.TestCase):
+class V42UiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest = main._build_manifest(main.build_ui, get_ctx().config)
         cls.widgets = _manifest_widgets(cls.manifest)
 
-    def test_project_builds_with_lcars_v4(self) -> None:
-        self.assertEqual(lcars.__version__, "4.1.0")
+    def test_project_builds_with_lcars_v42(self) -> None:
+        self.assertEqual(lcars.__version__, "4.2.0")
         self.assertEqual(len(self.manifest.pages), 12)
 
-    def test_manifest_uses_v4_capabilities(self) -> None:
+    def test_manifest_uses_v42_capabilities(self) -> None:
+        hub = self.manifest.pages["hub"]
+        self.assertEqual(hub.archetype, "grid")
+        self.assertFalse(hub.fillers)
+        results_panel = self.widgets["hf-results-panel"]
+        self.assertEqual(results_panel.weight, 12)
+        self.assertEqual(results_panel.aspect, "wide")
+        self.assertEqual(results_panel.group, "hf-discovery")
+        self.assertEqual(results_panel.span, (4, 5))
+        self.assertEqual(self.widgets["hf-search-panel"].group, "hf-discovery")
+        self.assertEqual(self.widgets["hf-search-panel"].span, (2, 6))
+        self.assertEqual(self.widgets["hf-filter-panel"].group, "hf-discovery")
+        self.assertEqual(self.widgets["hf-filter-panel"].span, (2, 6))
+        self.assertEqual(self.widgets["hf-target-panel"].group, "hf-selection")
+        self.assertEqual(self.widgets["hf-target-panel"].span, (2, 4))
+        self.assertEqual(self.widgets["hf-workflow-panel"].group, "hf-selection")
+        self.assertEqual(self.widgets["hf-workflow-panel"].span, (2, 5))
+        self.assertEqual(self.widgets["hf-transfers-panel"].group, "hf-transfers")
+        self.assertEqual(self.widgets["hf-transfers-panel"].span, (4, 3))
+        self.assertEqual(self.widgets["hf-activity-panel"].group, "hf-transfers")
+
         results = self.widgets["hf-results-table"]
         self.assertTrue(results.options.expandable)
         self.assertTrue(results.options.sticky_header)
@@ -80,12 +100,15 @@ class V4UiTests(unittest.TestCase):
             {child.id for child in search_form.children},
             {
                 "hf-query",
-                "hf-repo-type",
+                "hf-search-repo-type",
                 "hf-sort",
                 "hf-compatibility",
                 "hf-limit",
-                "hf-vram-limit",
             },
+        )
+        self.assertNotEqual(
+            self.widgets["hf-search-repo-type"].id,
+            self.widgets["hf-repo-type"].id,
         )
         self.assertEqual(
             self.widgets["run-cli-args"].options.commit,
@@ -184,6 +207,33 @@ class V4UiTests(unittest.TestCase):
             "experiment.yml",
         )
 
+    def test_legacy_hf_type_preference_migrates_to_search_without_retargeting(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "legacy-hf-type-migration"
+
+        def app_value(key: str, default: object = None) -> object:
+            return "model" if key == "hf_repo_type" else default
+
+        try:
+            clear_session_state(session_id)
+            set_ctx(_LCARSContext(mode=Mode.BUILD, session_id=session_id))
+            with (
+                patch.object(
+                    main.UI_STATE,
+                    "widget_values",
+                    return_value={"hf-repo-type": "dataset"},
+                ),
+                patch.object(main.UI_STATE, "get", side_effect=app_value),
+            ):
+                main._hydrate_widget_state()
+
+            state = get_session_state(session_id)
+            self.assertEqual(state["hf-search-repo-type"], "dataset")
+            self.assertEqual(state["hf-repo-type"], "model")
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
     def test_config_refresh_uses_checked_for_toggles_and_refreshes_choices(self) -> None:
         original_ctx = get_ctx()
         session_id = "config-refresh-types"
@@ -251,11 +301,10 @@ class V4UiTests(unittest.TestCase):
         session_id = "hf-atomic-form"
         payload = {
             "hf-query": "atomic dataset query",
-            "hf-repo-type": "dataset",
+            "hf-search-repo-type": "dataset",
             "hf-sort": "likes",
             "hf-compatibility": "include warnings and blocked",
             "hf-limit": "25",
-            "hf-vram-limit": 48,
         }
         try:
             clear_session_state(session_id)
@@ -281,11 +330,41 @@ class V4UiTests(unittest.TestCase):
                 "atomic dataset query",
             )
             self.assertEqual(
-                get_session_state(session_id)["hf-repo-type"],
+                get_session_state(session_id)["hf-search-repo-type"],
                 "dataset",
             )
+            self.assertEqual(get_session_state(session_id)["hf-repo-type"], "dataset")
         finally:
             main.STATE.hf.vram_limit_gb = original_vram
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_repository_actions_use_target_type_not_search_type(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "hf-independent-target-type"
+        try:
+            clear_session_state(session_id)
+            state = get_session_state(session_id)
+            state.update(
+                {
+                    "hf-search-repo-type": "dataset",
+                    "hf-repo-type": "model",
+                    "hf-repo-id": "example/model",
+                    "hf-revision": "",
+                }
+            )
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id="hf-use-repo",
+                )
+            )
+            with patch.object(main, "_hf_use_repo_action") as use_repo:
+                main._hub_page()
+
+            use_repo.assert_called_once_with("example/model", "model")
+        finally:
             clear_session_state(session_id)
             set_ctx(original_ctx)
 
@@ -547,6 +626,10 @@ class V4UiTests(unittest.TestCase):
             self.assertEqual(main.STATE.hf.last_repo_id, "")
             self.assertEqual(
                 get_session_state(session_id)["hf-repo-type"],
+                "dataset",
+            )
+            self.assertEqual(
+                get_session_state(session_id)["hf-search-repo-type"],
                 "dataset",
             )
         finally:

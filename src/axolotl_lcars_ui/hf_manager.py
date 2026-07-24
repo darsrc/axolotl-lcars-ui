@@ -240,7 +240,14 @@ class HuggingFaceManager:
                 continue
             if not _quant_matches(result, quant_filter):
                 continue
-            if fit_filter == "fits vram" and not result.fit.startswith("fits"):
+            # Dataset searches report data size rather than a model VRAM fit.
+            # Keep them visible when a persisted model-only VRAM filter survives
+            # a switch from model search to dataset search.
+            if (
+                fit_filter == "fits vram"
+                and result.repo_type == "model"
+                and not result.fit.startswith("fits")
+            ):
                 continue
             if fit_filter == "known size" and result.fit == "unknown":
                 continue

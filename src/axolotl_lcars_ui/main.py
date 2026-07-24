@@ -58,7 +58,6 @@ COMMAND_INPUT_OPTIONS = lcars.TextInputOptions(
     debounce_ms=250,
 )
 SEARCHABLE_CHOICES = lcars.ChoiceOptions(searchable=True)
-COMPACT_PANEL_OPTIONS = lcars.ContainerOptions(density="compact")
 COLLAPSIBLE_PANEL_OPTIONS = lcars.ContainerOptions(
     density="compact",
     overflow="auto",
@@ -295,6 +294,7 @@ def _persisted_widget_defaults() -> dict[str, Any]:
         "run-cli-args": "",
         "run-launcher-args": "",
         "hf-query": "llama instruct",
+        "hf-search-repo-type": STATE.hf.last_repo_type,
         "hf-repo-type": STATE.hf.last_repo_type,
         "hf-sort": HF_SORT_OPTIONS[0],
         "hf-compatibility": HF_COMPATIBILITY_OPTIONS[0],
@@ -320,6 +320,7 @@ def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
         "setup-dataset-preset": tuple(DATASET_PRESETS),
         "run-action": tuple(AXOLOTL_ACTIONS),
         "run-launcher": ("", "python", "accelerate", "torchrun"),
+        "hf-search-repo-type": ("model", "dataset"),
         "hf-repo-type": ("model", "dataset"),
         "hf-sort": tuple(HF_SORT_OPTIONS),
         "hf-compatibility": tuple(HF_COMPATIBILITY_OPTIONS),
@@ -391,9 +392,9 @@ def _restore_persisted_state() -> None:
     repo_type = str(
         _normalized_persisted_widget_value(
             "hf-repo-type",
-            saved_widgets.get(
-                "hf-repo-type",
-                UI_STATE.get("hf_repo_type", STATE.hf.last_repo_type),
+            UI_STATE.get(
+                "hf_repo_type",
+                saved_widgets.get("hf-repo-type", STATE.hf.last_repo_type),
             ),
         )
     )
@@ -459,360 +460,488 @@ def build_ui() -> None:
 
 
 def _command_page() -> None:
-    with lcars.page("Command", id="command", layout="console"):
-        with lcars.console("Axolotl Operations", color="tanoi"):
-            with lcars.data_panel("Launch Readiness", color="tanoi"):
-                issues = STATE.preflight_issues
-                errors = sum(1 for issue in issues if issue.severity == "error")
-                warnings = sum(1 for issue in issues if issue.severity == "warn")
-                lcars.metric(
-                    "Run Gate",
-                    "BLOCKED" if errors else "READY",
-                    status="crit" if errors else "ok",
-                    color="red" if errors else "tanoi",
-                    id="run-gate-metric",
-                    options=lcars.MetricOptions(
-                        secondary_value=f"{errors} blocking issue(s)",
-                        trend="down" if errors else "flat",
-                    ),
-                )
-                lcars.metric(
-                    "Warnings",
-                    str(warnings),
-                    status="warn" if warnings else "ok",
-                    color="golden-tanoi",
-                    id="warning-count-metric",
-                    options=lcars.MetricOptions(secondary_value="preflight advisories"),
-                )
-                lcars.metric(
-                    "Axolotl CLI",
-                    "FOUND" if STATE.runner.axolotl_path else "MISSING",
-                    status="ok" if STATE.runner.axolotl_path else "crit",
-                    color="anakiwa",
-                    id="axolotl-cli-metric",
-                    options=lcars.MetricOptions(
-                        secondary_value=STATE.runner.axolotl_path or "not on PATH",
-                    ),
-                )
-                _enhanced_table(
-                    issue_rows(issues),
-                    title="Preflight Matrix",
-                    id="preflight-table",
-                    filter_columns={"Level", "Check", "Detail"},
-                )
+    with lcars.page("Command", id="command", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Launch Readiness",
+            color="tanoi",
+            id="command-readiness-panel",
+            weight=12,
+            aspect="wide",
+            group="command-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            issues = STATE.preflight_issues
+            errors = sum(1 for issue in issues if issue.severity == "error")
+            warnings = sum(1 for issue in issues if issue.severity == "warn")
+            lcars.metric(
+                "Run Gate",
+                "BLOCKED" if errors else "READY",
+                status="crit" if errors else "ok",
+                color="red" if errors else "tanoi",
+                id="run-gate-metric",
+                options=lcars.MetricOptions(
+                    secondary_value=f"{errors} blocking issue(s)",
+                    trend="down" if errors else "flat",
+                ),
+            )
+            lcars.metric(
+                "Warnings",
+                str(warnings),
+                status="warn" if warnings else "ok",
+                color="golden-tanoi",
+                id="warning-count-metric",
+                options=lcars.MetricOptions(secondary_value="preflight advisories"),
+            )
+            lcars.metric(
+                "Axolotl CLI",
+                "FOUND" if STATE.runner.axolotl_path else "MISSING",
+                status="ok" if STATE.runner.axolotl_path else "crit",
+                color="anakiwa",
+                id="axolotl-cli-metric",
+                options=lcars.MetricOptions(
+                    secondary_value=STATE.runner.axolotl_path or "not on PATH",
+                ),
+            )
+            _enhanced_table(
+                issue_rows(issues),
+                title="Preflight Matrix",
+                id="preflight-table",
+                filter_columns={"Level", "Check", "Detail"},
+            )
 
-            with lcars.control_panel("Primary Actions", color="golden-tanoi"):
-                if lcars.button("Run Preflight", color="anakiwa", id="run-preflight"):
-                    _run_preflight_action()
-                if lcars.button("Save Structured Config", color="tanoi", id="save-structured-config"):
-                    _save_config_action()
-                if lcars.button(
-                    "Start Training",
-                    color="red",
-                    id="quick-start-training",
-                    options=lcars.ButtonOptions(
-                        confirm="Start Axolotl training with the active config?",
-                        debounce_ms=750,
-                        busy_label="Starting",
-                    ),
-                ):
-                    _start_axolotl_action("train")
-                if lcars.button(
-                    "Stop Axolotl",
-                    color="red",
-                    id="quick-stop-axolotl",
-                    options=lcars.ButtonOptions(
-                        confirm="Stop the active Axolotl process?",
-                        debounce_ms=750,
-                        busy_label="Stopping",
-                    ),
-                ):
-                    _stop_axolotl_action()
-                lcars.markdown(
-                    f"Active config: `{STATE.config_store.active_path}`\n\n"
-                    "[Open raw YAML editor](/raw)",
-                    id="command-raw-link",
-                    options=lcars.MarkdownOptions(copy_code=True),
-                )
+        with lcars.control_panel(
+            "Primary Actions",
+            color="golden-tanoi",
+            id="command-actions-panel",
+            weight=6,
+            aspect="tall",
+            group="command-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            if lcars.button("Run Preflight", color="anakiwa", id="run-preflight"):
+                _run_preflight_action()
+            if lcars.button("Save Structured Config", color="tanoi", id="save-structured-config"):
+                _save_config_action()
+            if lcars.button(
+                "Start Training",
+                color="red",
+                id="quick-start-training",
+                options=lcars.ButtonOptions(
+                    confirm="Start Axolotl training with the active config?",
+                    debounce_ms=750,
+                    busy_label="Starting",
+                ),
+            ):
+                _start_axolotl_action("train")
+            if lcars.button(
+                "Stop Axolotl",
+                color="red",
+                id="quick-stop-axolotl",
+                options=lcars.ButtonOptions(
+                    confirm="Stop the active Axolotl process?",
+                    debounce_ms=750,
+                    busy_label="Stopping",
+                ),
+            ):
+                _stop_axolotl_action()
+            lcars.markdown(
+                f"Active config: `{STATE.config_store.active_path}`\n\n"
+                "[Open raw YAML editor](/raw)",
+                id="command-raw-link",
+                options=lcars.MarkdownOptions(copy_code=True),
+            )
 
-            with lcars.data_panel("Current Config Summary", color="blue-bell"):
-                _enhanced_table(
-                    STATE.config_store.summary_rows(),
-                    title="Active YAML",
-                    id="config-summary-table",
-                    filter_columns={"Key", "Value"},
-                    copy_columns={"Key", "Value"},
-                )
+        with lcars.data_panel(
+            "Current Config Summary",
+            color="blue-bell",
+            id="command-config-panel",
+            weight=9,
+            aspect="wide",
+            group="command-config",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                STATE.config_store.summary_rows(),
+                title="Active YAML",
+                id="config-summary-table",
+                filter_columns={"Key", "Value"},
+                copy_columns={"Key", "Value"},
+            )
 
 
 def _config_page() -> None:
-    with lcars.page("Config", id="config", layout="console"):
-        with lcars.console("Config Manager", color="golden-tanoi"):
+    with lcars.page("Config", id="config", layout="grid", fillers=False):
+        with lcars.control_panel(
+            "Config Files",
+            color="golden-tanoi",
+            id="config-files-panel",
+            weight=7,
+            aspect="tall",
+            group="config-manager",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             lcars.markdown(
                 "Structured pages cover the high-impact Axolotl surface. The raw YAML editor remains "
                 "the complete escape hatch for deeply nested or experimental options.",
                 id="config-note",
             )
-            with lcars.control_panel("Config Files", color="golden-tanoi"):
-                configs = STATE.config_store.list_configs()
-                with lcars.form(
-                    "Active Config Selection",
-                    action_id="config-switch",
-                    submit_label="Switch Config",
-                    id="config-switch-form",
-                    color="anakiwa",
-                ):
-                    selected = lcars.select(
-                        "Active Config",
-                        configs,
-                        value=STATE.config_store.active_name,
-                        id="active-config-select",
-                        settings=SEARCHABLE_CHOICES,
-                    )
-                if _is_active_action("config-switch"):
-                    _switch_config_action(selected)
-                with lcars.form(
-                    "New Starter Config",
-                    action_id="config-create",
-                    submit_label="Create Starter",
-                    id="config-create-form",
-                    color="tanoi",
-                ):
-                    _seed_text("new-config-name", "experiment.yml")
-                    new_name = lcars.text_input(
-                        "New Config Name",
-                        value="experiment.yml",
-                        placeholder="experiment.yml",
-                        autocomplete=False,
-                        id="new-config-name",
-                        options=lcars.TextInputOptions(
-                            commit="enter",
-                            validation=lcars.ValidationOptions(
-                                required=True,
-                                pattern=r"^[^/\\]+\.ya?ml$",
-                                message="Use a YAML filename without directories.",
-                            ),
+            configs = STATE.config_store.list_configs()
+            with lcars.form(
+                "Active Config Selection",
+                action_id="config-switch",
+                submit_label="Switch Config",
+                id="config-switch-form",
+                color="anakiwa",
+            ):
+                selected = lcars.select(
+                    "Active Config",
+                    configs,
+                    value=STATE.config_store.active_name,
+                    id="active-config-select",
+                    settings=SEARCHABLE_CHOICES,
+                )
+            if _is_active_action("config-switch"):
+                _switch_config_action(selected)
+            with lcars.form(
+                "New Starter Config",
+                action_id="config-create",
+                submit_label="Create Starter",
+                id="config-create-form",
+                color="tanoi",
+            ):
+                _seed_text("new-config-name", "experiment.yml")
+                new_name = lcars.text_input(
+                    "New Config Name",
+                    value="experiment.yml",
+                    placeholder="experiment.yml",
+                    autocomplete=False,
+                    id="new-config-name",
+                    options=lcars.TextInputOptions(
+                        commit="enter",
+                        validation=lcars.ValidationOptions(
+                            required=True,
+                            pattern=r"^[^/\\]+\.ya?ml$",
+                            message="Use a YAML filename without directories.",
                         ),
-                    )
-                if _is_active_action("config-create"):
-                    _create_config_action(new_name)
-                if lcars.button("Duplicate Active", color="lilac", id="config-duplicate"):
-                    _duplicate_config_action()
-                if lcars.button("Save All Structured", color="tanoi", id="config-save-all"):
-                    _save_config_action()
-                if lcars.button("Validate Config", color="anakiwa", id="config-validate"):
-                    _run_preflight_action()
+                    ),
+                )
+            if _is_active_action("config-create"):
+                _create_config_action(new_name)
+            if lcars.button("Duplicate Active", color="lilac", id="config-duplicate"):
+                _duplicate_config_action()
+            if lcars.button("Save All Structured", color="tanoi", id="config-save-all"):
+                _save_config_action()
+            if lcars.button("Validate Config", color="anakiwa", id="config-validate"):
+                _run_preflight_action()
 
-            with lcars.data_panel("Coverage Map", color="blue-bell"):
-                _enhanced_table(
-                    _coverage_rows(),
-                    title="Structured Surface",
-                    id="config-coverage-table",
-                    filter_columns={"Page", "Group"},
-                    numeric_columns={"Fields"},
-                )
-                _enhanced_table(
-                    STATE.config_store.summary_rows(),
-                    title="Summary",
-                    id="config-page-summary-table",
-                    filter_columns={"Key", "Value"},
-                    copy_columns={"Key", "Value"},
-                )
+        with lcars.data_panel(
+            "Coverage Map",
+            color="blue-bell",
+            id="config-coverage-panel",
+            weight=12,
+            aspect="wide",
+            group="config-manager",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                _coverage_rows(),
+                title="Structured Surface",
+                id="config-coverage-table",
+                filter_columns={"Page", "Group"},
+                numeric_columns={"Fields"},
+            )
+            _enhanced_table(
+                STATE.config_store.summary_rows(),
+                title="Summary",
+                id="config-page-summary-table",
+                filter_columns={"Key", "Value"},
+                copy_columns={"Key", "Value"},
+            )
 
 
 def _config_setup_page() -> None:
-    with lcars.page("Setup", id="config-setup", layout="console"):
-        with lcars.console("Setup Workflow", color="pale-canary"):
-            _setup_smart_panel()
-            with lcars.data_panel(
-                "Defaults / Examples",
-                color="blue-bell",
-                id="setup-defaults-panel",
+    with lcars.page("Setup", id="config-setup", layout="grid", fillers=False):
+        _setup_smart_panel()
+        with lcars.data_panel(
+            "Defaults / Examples",
+            color="blue-bell",
+            id="setup-defaults-panel",
+            weight=12,
+            aspect="wide",
+            group="setup-reference",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                _setup_default_rows(),
+                title="Axolotl Defaults And Starters",
+                id="setup-defaults-table",
+                filter_columns={"Field", "Need", "Role"},
+                copy_columns={"Field"},
+                page_size=25,
+            )
+        for group, color in (
+            ("Model", "pale-canary"),
+            ("Dataset", "golden-tanoi"),
+            ("Sequence / Packing", "anakiwa"),
+            ("Run Safety", "lilac"),
+        ):
+            group_id = group.lower().replace(" ", "-").replace("/", "")
+            with lcars.padd(
+                f"{group} Essentials",
+                color=color,
+                id=f"setup-{group_id}-panel",
+                weight=7,
+                aspect="tall",
+                group="setup-fields",
                 options=COLLAPSIBLE_PANEL_OPTIONS,
             ):
-                _enhanced_table(
-                    _setup_default_rows(),
-                    title="Axolotl Defaults And Starters",
-                    id="setup-defaults-table",
-                    filter_columns={"Field", "Need", "Role"},
-                    copy_columns={"Field"},
-                    page_size=25,
-                )
-            for group, color in (
-                ("Model", "pale-canary"),
-                ("Dataset", "golden-tanoi"),
-                ("Sequence / Packing", "anakiwa"),
-                ("Run Safety", "lilac"),
-            ):
-                with lcars.data_panel(f"{group} Essentials", color=color):
-                    _render_config_fields({group}, keys=SETUP_FIELD_KEYS, include_headers=False)
-            _config_page_actions("setup")
+                _render_config_fields({group}, keys=SETUP_FIELD_KEYS, include_headers=False)
+        _config_page_actions("setup")
 
 
 def _config_train_page() -> None:
-    with lcars.page("Train", id="config-train", layout="grid"):
-        with lcars.padd("Training / Adapter / Optimizer", color="tanoi"):
-            _render_config_fields({"Training", "Adapter / PEFT", "Optimizer"})
-            _config_page_actions("train")
+    _config_group_page(
+        "Train",
+        "config-train",
+        "tanoi",
+        ("Training", "Adapter / PEFT", "Optimizer"),
+        "train",
+    )
 
 
 def _config_hardware_page() -> None:
-    with lcars.page("Hardware", id="config-hardware", layout="grid"):
-        with lcars.padd("Precision / Kernels / Distributed", color="anakiwa"):
-            _render_config_fields({"Precision / Memory", "Attention / Kernels", "Distributed"})
-            _config_page_actions("hardware")
+    _config_group_page(
+        "Hardware",
+        "config-hardware",
+        "anakiwa",
+        ("Precision / Memory", "Attention / Kernels", "Distributed"),
+        "hardware",
+    )
 
 
 def _config_tracking_page() -> None:
-    with lcars.page("Tracking", id="config-tracking", layout="grid"):
-        with lcars.padd("Tracking / Integrations / RL", color="lilac"):
-            _render_config_fields({"Tracking", "Integrations", "RL / Evaluation"})
-            _config_page_actions("tracking")
+    _config_group_page(
+        "Tracking",
+        "config-tracking",
+        "lilac",
+        ("Tracking", "Integrations", "RL / Evaluation"),
+        "tracking",
+    )
+
+
+def _config_group_page(
+    title: str,
+    page_id: str,
+    color: str,
+    groups: tuple[str, ...],
+    suffix: str,
+) -> None:
+    with lcars.page(title, id=page_id, layout="grid", fillers=False):
+        for group_name in groups:
+            group_id = group_name.lower().replace(" ", "-").replace("/", "")
+            with lcars.padd(
+                group_name,
+                color=color,
+                id=f"{suffix}-{group_id}-panel",
+                weight=8,
+                aspect="tall",
+                group=f"{suffix}-fields",
+                options=COLLAPSIBLE_PANEL_OPTIONS,
+            ):
+                _render_config_fields({group_name})
+        _config_page_actions(suffix)
 
 
 def _config_advanced_page() -> None:
-    with lcars.page("Advanced", id="config-advanced", layout="console"):
-        with lcars.console("Advanced Structured Axolotl Surface", color="blue-bell"):
-            with lcars.padd("Advanced Setup Fields", color="blue-bell"):
-                advanced_groups = {"Run Safety", "Model", "Dataset", "Sequence / Packing"}
-                advanced_keys = {
-                    spec.key
-                    for spec in FIELD_SPECS
-                    if spec.group in advanced_groups and spec.key not in SETUP_FIELD_KEYS
-                }
-                _render_config_fields(keys=advanced_keys, id_prefix="advanced")
-                _config_page_actions("advanced")
+    advanced_groups = ("Run Safety", "Model", "Dataset", "Sequence / Packing")
+    with lcars.page("Advanced", id="config-advanced", layout="grid", fillers=False):
+        for group_name in advanced_groups:
+            group_keys = {
+                spec.key
+                for spec in FIELD_SPECS
+                if spec.group == group_name and spec.key not in SETUP_FIELD_KEYS
+            }
+            if not group_keys:
+                continue
+            group_id = group_name.lower().replace(" ", "-").replace("/", "")
+            with lcars.padd(
+                f"{group_name} Advanced",
+                color="blue-bell",
+                id=f"advanced-{group_id}-panel",
+                weight=8,
+                aspect="tall",
+                group="advanced-fields",
+                options=COLLAPSIBLE_PANEL_OPTIONS,
+            ):
+                _render_config_fields(
+                    {group_name},
+                    keys=group_keys,
+                    id_prefix="advanced",
+                )
+        _config_page_actions("advanced")
 
 
 def _run_page() -> None:
-    with lcars.page("Run", id="run", layout="console"):
-        with lcars.console("Axolotl Run Monitor", color="red"):
-            with lcars.data_panel("Process State", color="red"):
-                lcars.metric(
-                    "Status",
-                    STATE.runner.status_label(),
-                    status=STATE.runner.status_severity(),
-                    color="red",
-                    id="run-status",
-                    options=lcars.MetricOptions(
-                        secondary_value=STATE.config_store.active_name,
-                    ),
-                )
-                command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
-                lcars.text(
-                    command[:260],
-                    size="mono",
-                    id="run-command-text",
-                    options=lcars.TextOptions(copyable=True, wrap="pre"),
-                )
-                lcars.log(
-                    LOG_AXOLOTL,
-                    max_lines=1000,
-                    title="Axolotl Output",
-                    id="axolotl-output-log",
-                    options=LOG_VIEW_OPTIONS,
-                )
+    with lcars.page("Run", id="run", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Process State",
+            color="red",
+            id="run-process-panel",
+            weight=12,
+            aspect="wide",
+            group="run-console",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.metric(
+                "Status",
+                STATE.runner.status_label(),
+                status=STATE.runner.status_severity(),
+                color="red",
+                id="run-status",
+                options=lcars.MetricOptions(
+                    secondary_value=STATE.config_store.active_name,
+                ),
+            )
+            command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
+            lcars.text(
+                command[:260],
+                size="mono",
+                id="run-command-text",
+                options=lcars.TextOptions(copyable=True, wrap="pre"),
+            )
+            lcars.log(
+                LOG_AXOLOTL,
+                max_lines=1000,
+                title="Axolotl Output",
+                id="axolotl-output-log",
+                options=LOG_VIEW_OPTIONS,
+            )
 
-            with lcars.control_panel(
-                "Launch Controls",
-                color="golden-tanoi",
-                options=COMPACT_PANEL_OPTIONS,
+        with lcars.control_panel(
+            "Launch Controls",
+            color="golden-tanoi",
+            id="run-controls-panel",
+            weight=7,
+            aspect="tall",
+            group="run-console",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            action = lcars.select(
+                "Axolotl Action",
+                list(AXOLOTL_ACTIONS),
+                value="train",
+                id="run-action",
+                settings=SEARCHABLE_CHOICES,
+            )
+            launcher = lcars.select(
+                "Launcher",
+                [
+                    lcars.SelectOption(label="Axolotl default", value=""),
+                    lcars.SelectOption(label="Python", value="python"),
+                    lcars.SelectOption(label="Accelerate", value="accelerate"),
+                    lcars.SelectOption(label="Torchrun", value="torchrun"),
+                ],
+                value="",
+                id="run-launcher",
+            )
+            _seed_text("run-cli-args", "")
+            cli_args = lcars.text_input(
+                "Axolotl Args",
+                placeholder="Action flags or fetch target, shell-style",
+                autocomplete=False,
+                id="run-cli-args",
+                options=COMMAND_INPUT_OPTIONS,
+            )
+            _seed_text("run-launcher-args", "")
+            launcher_args = lcars.text_input(
+                "Launcher Args",
+                placeholder="Placed after -- for accelerate/torchrun",
+                autocomplete=False,
+                id="run-launcher-args",
+                options=COMMAND_INPUT_OPTIONS,
+            )
+            if lcars.button(
+                "Start",
+                color="red",
+                id="run-start",
+                options=lcars.ButtonOptions(
+                    confirm="Launch this Axolotl action?",
+                    debounce_ms=750,
+                    busy_label="Launching",
+                ),
             ):
-                action = lcars.select(
-                    "Axolotl Action",
-                    list(AXOLOTL_ACTIONS),
-                    value="train",
-                    id="run-action",
-                    settings=SEARCHABLE_CHOICES,
+                _start_axolotl_action(
+                    action,
+                    launcher=launcher,
+                    cli_args=cli_args,
+                    launcher_args=launcher_args,
                 )
-                launcher = lcars.select(
-                    "Launcher",
-                    [
-                        lcars.SelectOption(label="Axolotl default", value=""),
-                        lcars.SelectOption(label="Python", value="python"),
-                        lcars.SelectOption(label="Accelerate", value="accelerate"),
-                        lcars.SelectOption(label="Torchrun", value="torchrun"),
-                    ],
-                    value="",
-                    id="run-launcher",
-                )
-                _seed_text("run-cli-args", "")
-                cli_args = lcars.text_input(
-                    "Axolotl Args",
-                    placeholder="Action flags or fetch target, shell-style",
-                    autocomplete=False,
-                    id="run-cli-args",
-                    options=COMMAND_INPUT_OPTIONS,
-                )
-                _seed_text("run-launcher-args", "")
-                launcher_args = lcars.text_input(
-                    "Launcher Args",
-                    placeholder="Placed after -- for accelerate/torchrun",
-                    autocomplete=False,
-                    id="run-launcher-args",
-                    options=COMMAND_INPUT_OPTIONS,
-                )
-                if lcars.button(
-                    "Start",
-                    color="red",
-                    id="run-start",
-                    options=lcars.ButtonOptions(
-                        confirm="Launch this Axolotl action?",
-                        debounce_ms=750,
-                        busy_label="Launching",
-                    ),
-                ):
-                    _start_axolotl_action(action, launcher=launcher, cli_args=cli_args, launcher_args=launcher_args)
-                if lcars.button(
-                    "Stop",
-                    color="red",
-                    id="run-stop",
-                    options=lcars.ButtonOptions(
-                        confirm="Stop the active Axolotl process?",
-                        debounce_ms=750,
-                        busy_label="Stopping",
-                    ),
-                ):
-                    _stop_axolotl_action()
-                if lcars.button("Preflight", color="anakiwa", id="run-preflight-local"):
-                    _run_preflight_action()
+            if lcars.button(
+                "Stop",
+                color="red",
+                id="run-stop",
+                options=lcars.ButtonOptions(
+                    confirm="Stop the active Axolotl process?",
+                    debounce_ms=750,
+                    busy_label="Stopping",
+                ),
+            ):
+                _stop_axolotl_action()
+            if lcars.button("Preflight", color="anakiwa", id="run-preflight-local"):
+                _run_preflight_action()
 
-            with lcars.data_panel("Live Hardware", color="anakiwa"):
-                snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
-                lcars.metric(
-                    "CPU",
-                    f"{snapshot.cpu_percent:.0f}%",
-                    status=_percent_status(snapshot.cpu_percent),
-                    color="anakiwa",
-                    id="system-cpu",
-                    options=lcars.MetricOptions(
-                        trend="up" if snapshot.cpu_percent >= 80 else "flat",
-                    ),
-                )
-                lcars.metric(
-                    "RAM",
-                    f"{snapshot.ram_percent:.0f}%",
-                    status=_percent_status(snapshot.ram_percent),
-                    color="blue-bell",
-                    id="system-ram",
-                    options=lcars.MetricOptions(
-                        secondary_value=format_bytes(snapshot.ram_used),
-                        trend="up" if snapshot.ram_percent >= 80 else "flat",
-                    ),
-                )
-                _enhanced_table(
-                    gpu_rows(snapshot.gpus),
-                    title="GPU",
-                    id="run-gpu-table",
-                    filter_columns={"GPU", "Name"},
-                )
+        with lcars.data_panel(
+            "Live Hardware",
+            color="anakiwa",
+            id="run-hardware-panel",
+            weight=9,
+            aspect="wide",
+            group="run-hardware",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
+            lcars.metric(
+                "CPU",
+                f"{snapshot.cpu_percent:.0f}%",
+                status=_percent_status(snapshot.cpu_percent),
+                color="anakiwa",
+                id="system-cpu",
+                options=lcars.MetricOptions(
+                    trend="up" if snapshot.cpu_percent >= 80 else "flat",
+                ),
+            )
+            lcars.metric(
+                "RAM",
+                f"{snapshot.ram_percent:.0f}%",
+                status=_percent_status(snapshot.ram_percent),
+                color="blue-bell",
+                id="system-ram",
+                options=lcars.MetricOptions(
+                    secondary_value=format_bytes(snapshot.ram_used),
+                    trend="up" if snapshot.ram_percent >= 80 else "flat",
+                ),
+            )
+            _enhanced_table(
+                gpu_rows(snapshot.gpus),
+                title="GPU",
+                id="run-gpu-table",
+                filter_columns={"GPU", "Name"},
+            )
 
 
 def _resources_page() -> None:
-    with lcars.page("Resources", id="resources", layout="telemetry"):
+    with lcars.page("Resources", id="resources", layout="grid", fillers=False):
         snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
         cfg = _load_config_or_empty()
-        with lcars.diagnostic("System Telemetry", color="anakiwa"):
+        with lcars.data_panel(
+            "System Load",
+            color="anakiwa",
+            id="resource-load-panel",
+            weight=6,
+            aspect="tall",
+            group="resource-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             meter_options = lcars.MeterOptions(
                 unit="%",
                 segments=24,
@@ -845,6 +974,16 @@ def _resources_page() -> None:
                 color="blue-bell",
                 id="ram-used-metric",
             )
+
+        with lcars.data_panel(
+            "Resource Trend",
+            color="anakiwa",
+            id="resource-trend-panel",
+            weight=12,
+            aspect="wide",
+            group="resource-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             lcars.chart(
                 STATE.telemetry.chart_payload(),
                 title="Resource Trend",
@@ -861,12 +1000,32 @@ def _resources_page() -> None:
                     ],
                 ),
             )
+
+        with lcars.data_panel(
+            "GPU Telemetry",
+            color="blue-bell",
+            id="resource-gpu-panel",
+            weight=9,
+            aspect="wide",
+            group="resource-detail",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 gpu_rows(snapshot.gpus),
                 title="GPU Telemetry",
                 id="gpu-table",
                 filter_columns={"GPU", "Name"},
             )
+
+        with lcars.data_panel(
+            "Process Telemetry",
+            color="lilac",
+            id="resource-process-panel",
+            weight=10,
+            aspect="wide",
+            group="resource-detail",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 process_rows(),
                 title="Top RAM / CPU Processes",
@@ -881,6 +1040,16 @@ def _resources_page() -> None:
                 filter_columns={"PID", "GPU", "Process"},
                 page_size=10,
             )
+
+        with lcars.data_panel(
+            "Storage Telemetry",
+            color="golden-tanoi",
+            id="resource-storage-panel",
+            weight=9,
+            aspect="wide",
+            group="resource-storage",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 disk_rows(snapshot.disks),
                 title="Mounted Disks",
@@ -899,11 +1068,15 @@ def _resources_page() -> None:
 
 def _hub_page() -> None:
     _handle_hf_table_action()
-    with lcars.page("HF Hub", id="hub", layout="console"):
+    with lcars.page("HF Hub", id="hub", layout="grid", fillers=False):
         with lcars.data_panel(
             "Repository Browser",
             color="lilac",
-            zone="primary",
+            id="hf-results-panel",
+            span=(4, 5),
+            weight=12,
+            aspect="wide",
+            group="hf-discovery",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             lcars.table(
@@ -915,14 +1088,17 @@ def _hub_page() -> None:
             )
 
         with lcars.control_panel(
-            "Hub Discovery",
+            "Hub Search",
             color="lilac",
-            zone="side",
-            id="search-command",
+            id="hf-search-panel",
+            span=(2, 6),
+            weight=8,
+            aspect="flex",
+            group="hf-discovery",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             with lcars.form(
-                "Hugging Face Search",
+                "",
                 action_id="hf-search",
                 submit_label="Run Search",
                 id="hf-search-form",
@@ -938,11 +1114,11 @@ def _hub_page() -> None:
                     id="hf-query",
                     options=SEARCH_INPUT_OPTIONS,
                 )
-                repo_type = lcars.select(
+                search_repo_type = lcars.select(
                     "Repo Type",
                     ["model", "dataset"],
                     value=STATE.hf.last_repo_type,
-                    id="hf-repo-type",
+                    id="hf-search-repo-type",
                 )
                 sort = lcars.select("HF Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
                 compatibility = lcars.select(
@@ -952,25 +1128,12 @@ def _hub_page() -> None:
                     id="hf-compatibility",
                 )
                 limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
-                vram_limit = lcars.number_input(
-                    "VRAM Limit [filter]",
-                    value=float(STATE.hf.vram_limit_gb or 24),
-                    min=1,
-                    max=256,
-                    step=1,
-                    id="hf-vram-limit",
-                    options=lcars.NumberInputOptions(
-                        precision=0,
-                        suffix=" GB",
-                        required=True,
-                    ),
-                )
             # The sift controls are rendered below, so their live values are read from
             # session state instead of the (not yet assigned) widget returns.
             if _is_active_action("hf-search") or _is_active_action("hf-query"):
                 _hf_search_action(
                     query,
-                    repo_type,
+                    search_repo_type,
                     sort=sort,
                     compatibility=compatibility,
                     limit=limit,
@@ -979,17 +1142,25 @@ def _hub_page() -> None:
                     artifact_filter=_widget_value("hf-artifact-filter", HF_ARTIFACT_FILTER_OPTIONS[0]),
                     quant_filter=_widget_value("hf-quant-filter", HF_QUANT_FILTER_OPTIONS[0]),
                     fit_filter=_widget_value("hf-fit-filter", HF_FIT_FILTER_OPTIONS[0]),
-                    vram_limit=vram_limit,
+                    vram_limit=_widget_value(
+                        "hf-vram-limit",
+                        str(STATE.hf.vram_limit_gb or 24),
+                    ),
                 )
-            lcars.header(
-                "Local Metadata Filters",
-                size="h3",
-                color="blue-bell",
-                id="hf-filter-header",
-            )
+
+        with lcars.control_panel(
+            "Result Sift",
+            color="blue-bell",
+            id="hf-filter-panel",
+            span=(2, 6),
+            weight=5,
+            aspect="flex",
+            group="hf-discovery",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _seed_text("hf-sift", "")
             sift = lcars.text_input(
-                "Metadata Contains [optional]",
+                "Metadata Contains",
                 placeholder="repo, tag, quant, family",
                 autocomplete=False,
                 id="hf-sift",
@@ -1000,16 +1171,32 @@ def _hub_page() -> None:
                 HF_ARTIFACT_FILTER_OPTIONS,
                 value=HF_ARTIFACT_FILTER_OPTIONS[0],
                 id="hf-artifact-filter",
-                settings=SEARCHABLE_CHOICES,
             )
             quant_filter = lcars.select(
                 "Weight Format",
                 HF_QUANT_FILTER_OPTIONS,
                 value=HF_QUANT_FILTER_OPTIONS[0],
                 id="hf-quant-filter",
-                settings=SEARCHABLE_CHOICES,
             )
-            fit_filter = lcars.select("VRAM Fit", HF_FIT_FILTER_OPTIONS, value="any", id="hf-fit-filter")
+            vram_limit = lcars.number_input(
+                "Model VRAM Budget",
+                value=float(STATE.hf.vram_limit_gb or 24),
+                min=1,
+                max=256,
+                step=1,
+                id="hf-vram-limit",
+                options=lcars.NumberInputOptions(
+                    precision=0,
+                    suffix=" GB",
+                    required=True,
+                ),
+            )
+            fit_filter = lcars.select(
+                "Model VRAM Fit",
+                HF_FIT_FILTER_OPTIONS,
+                value="any",
+                id="hf-fit-filter",
+            )
             if lcars.button("Apply Sift", color="blue-bell", id="hf-apply-sift"):
                 _hf_sift_action(
                     sift=sift,
@@ -1030,10 +1217,13 @@ def _hub_page() -> None:
                 )
 
         with lcars.control_panel(
-            "Repository Command",
+            "Repository Target",
             color="anakiwa",
-            zone="side",
-            id="repository-command",
+            id="hf-target-panel",
+            span=(2, 4),
+            weight=7,
+            aspect="tall",
+            group="hf-selection",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             lcars.text(
@@ -1041,6 +1231,12 @@ def _hub_page() -> None:
                 size="mono",
                 id="hf-selected-repo-copy",
                 options=_hf_selected_text_options(STATE.hf.last_repo_id, STATE.hf.last_repo_type),
+            )
+            target_repo_type = lcars.select(
+                "Repository Type",
+                ["model", "dataset"],
+                value=STATE.hf.last_repo_type,
+                id="hf-repo-type",
             )
             _seed_text("hf-repo-id", STATE.hf.last_repo_id, force=True)
             repo_id = lcars.text_input(
@@ -1074,12 +1270,23 @@ def _hub_page() -> None:
                 id="hf-inspect",
                 disabled=not bool(repo_id.strip()),
             ) or _is_active_action("hf-repo-id"):
-                _hf_inspect_action(repo_id, repo_type, revision)
+                _hf_inspect_action(repo_id, target_repo_type, revision)
+
+        with lcars.control_panel(
+            "Repository Workflow",
+            color="tanoi",
+            id="hf-workflow-panel",
+            span=(2, 5),
+            weight=4,
+            aspect="tall",
+            group="hf-selection",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             if lcars.button(
                 "Find Fine-Tunes",
                 color="lilac",
                 id="hf-related",
-                disabled=not bool(repo_id.strip()) or repo_type != "model",
+                disabled=not bool(repo_id.strip()) or target_repo_type != "model",
             ):
                 _hf_related_action(repo_id)
             if lcars.button(
@@ -1093,26 +1300,30 @@ def _hub_page() -> None:
                     busy_label="Queueing",
                 ),
             ):
-                _hf_download_action(repo_id, repo_type, revision)
+                _hf_download_action(repo_id, target_repo_type, revision)
             if lcars.button(
                 "Use Repo In Config",
                 color="tanoi",
                 id="hf-use-repo",
                 disabled=not bool(repo_id.strip()) or selected_blocked,
             ):
-                _hf_use_repo_action(repo_id, repo_type)
+                _hf_use_repo_action(repo_id, target_repo_type)
             if lcars.button(
                 "Use Last Local Snapshot",
                 color="blue-bell",
                 id="hf-use-local",
                 disabled=not bool(STATE.hf.last_local_path),
             ):
-                _hf_use_last_local_action(repo_type)
+                _hf_use_last_local_action(target_repo_type)
 
         with lcars.data_panel(
-            "Transfers",
+            "Transfer Queue",
             color="golden-tanoi",
-            zone="dock",
+            id="hf-transfers-panel",
+            span=(4, 3),
+            weight=10,
+            aspect="wide",
+            group="hf-transfers",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             _enhanced_table(
@@ -1123,6 +1334,16 @@ def _hub_page() -> None:
                 copy_columns={"Repo", "Revision", "Local Path"},
                 page_size=25,
             )
+
+        with lcars.data_panel(
+            "Hub Activity",
+            color="red",
+            id="hf-activity-panel",
+            weight=7,
+            aspect="tall",
+            group="hf-transfers",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             lcars.log(
                 LOG_HF,
                 max_lines=300,
@@ -1134,8 +1355,16 @@ def _hub_page() -> None:
 
 def _content_page() -> None:
     rows, total_text, total_bytes = STATE.hf.cache_rows()
-    with lcars.page("Content", id="content", layout="telemetry"):
-        with lcars.diagnostic("Downloaded Content Manager", color="blue-bell"):
+    with lcars.page("Content", id="content", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Downloaded Content",
+            color="blue-bell",
+            id="content-cache-panel",
+            weight=12,
+            aspect="wide",
+            group="content-cache",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             lcars.metric(
                 "HF Cache",
                 cache_summary_text(total_bytes, total_text),
@@ -1164,41 +1393,73 @@ def _content_page() -> None:
                 copy_columns={"Repo", "Revision", "Path"},
                 page_size=25,
             )
-            with lcars.control_panel("Cache Disposal", color="golden-tanoi"):
-                _seed_text("delete-repo-id", STATE.hf.last_repo_id)
-                repo_id = lcars.text_input(
-                    "Delete Repo ID",
-                    placeholder="owner/name",
-                    autocomplete=False,
-                    id="delete-repo-id",
-                    options=SEARCH_INPUT_OPTIONS,
-                )
-                repo_type = lcars.select("Delete Repo Type", ["model", "dataset"], value=STATE.hf.last_repo_type, id="delete-repo-type")
-                if lcars.button("Refresh Cache", color="anakiwa", id="cache-refresh"):
-                    _update_cache_widgets()
-                    lcars.notify("HF cache refreshed.")
-                if lcars.button(
-                    "Delete Cached Repo",
-                    color="red",
-                    id="cache-delete",
-                    options=lcars.ButtonOptions(
-                        confirm="Permanently remove this repository from the local HF cache?",
-                        debounce_ms=750,
-                        busy_label="Deleting",
-                    ),
-                ):
-                    _delete_cache_action(repo_id, repo_type)
+
+        with lcars.control_panel(
+            "Cache Disposal",
+            color="golden-tanoi",
+            id="content-disposal-panel",
+            weight=6,
+            aspect="tall",
+            group="content-cache",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _seed_text("delete-repo-id", STATE.hf.last_repo_id)
+            repo_id = lcars.text_input(
+                "Delete Repo ID",
+                placeholder="owner/name",
+                autocomplete=False,
+                id="delete-repo-id",
+                options=SEARCH_INPUT_OPTIONS,
+            )
+            repo_type = lcars.select(
+                "Delete Repo Type",
+                ["model", "dataset"],
+                value=STATE.hf.last_repo_type,
+                id="delete-repo-type",
+            )
+            if lcars.button("Refresh Cache", color="anakiwa", id="cache-refresh"):
+                _update_cache_widgets()
+                lcars.notify("HF cache refreshed.")
+            if lcars.button(
+                "Delete Cached Repo",
+                color="red",
+                id="cache-delete",
+                options=lcars.ButtonOptions(
+                    confirm="Permanently remove this repository from the local HF cache?",
+                    debounce_ms=750,
+                    busy_label="Deleting",
+                ),
+            ):
+                _delete_cache_action(repo_id, repo_type)
 
 
 def _ollama_page() -> None:
-    with lcars.page("Ollama", id="ollama", layout="grid"):
-        with lcars.padd("Ollama Detection", color="pale-canary"):
+    with lcars.page("Ollama", id="ollama", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Axolotl Source Gate",
+            color="pale-canary",
+            id="ollama-rules-panel",
+            weight=6,
+            aspect="wide",
+            group="ollama-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 _ollama_rule_rows(),
                 title="Axolotl Source Gate",
                 id="ollama-rule-table",
                 filter_columns={"Source", "Action"},
             )
+
+        with lcars.data_panel(
+            "Local Ollama Models",
+            color="pale-canary",
+            id="ollama-models-panel",
+            weight=12,
+            aspect="wide",
+            group="ollama-overview",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 STATE.ollama.rows(),
                 title="Local Ollama Models",
@@ -1207,6 +1468,16 @@ def _ollama_page() -> None:
                 copy_columns={"Model", "Source"},
                 page_size=25,
             )
+
+        with lcars.control_panel(
+            "Ollama Source Workflow",
+            color="tanoi",
+            id="ollama-workflow-panel",
+            weight=6,
+            aspect="wide",
+            group="ollama-workflow",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
             _seed_text("ollama-model-name", STATE.ollama.models[0].name if STATE.ollama.models else "")
             model_name = lcars.text_input(
                 "Ollama Model Name",
@@ -1227,8 +1498,11 @@ def _setup_smart_panel() -> None:
     with lcars.control_panel(
         "Smart Setup",
         color="pale-canary",
-        zone="primary",
-        options=COMPACT_PANEL_OPTIONS,
+        id="setup-smart-panel",
+        weight=8,
+        aspect="tall",
+        group="setup-reference",
+        options=COLLAPSIBLE_PANEL_OPTIONS,
     ):
         recipe = lcars.select(
             "Recipe",
@@ -2121,7 +2395,11 @@ def _config_page_actions(suffix: str) -> None:
     with lcars.control_panel(
         "Page Actions",
         color="golden-tanoi",
-        options=COMPACT_PANEL_OPTIONS,
+        id=f"config-actions-{suffix}",
+        weight=3,
+        aspect="wide",
+        group=f"{suffix}-fields",
+        options=COLLAPSIBLE_PANEL_OPTIONS,
     ):
         if lcars.button("Save Config", color="tanoi", id=f"config-save-{suffix}"):
             _save_config_action()
@@ -2309,6 +2587,8 @@ def _hf_search_action(
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
+    _set_widget_value("hf-query", query)
+    _set_widget_value("hf-search-repo-type", repo_type)
     vram = _optional_float(vram_limit)
     results = STATE.hf.search(
         query,
@@ -2517,8 +2797,9 @@ def _ollama_search_hf_action(model_name: str) -> None:
     if model.hf_hint and not _looks_gguf(model.hf_hint):
         STATE.hf.inspect_repo(model.hf_hint, "model")
     _update_hf_widgets()
+    _set_widget_value("hf-query", query)
+    _set_widget_value("hf-search-repo-type", "model")
     if results:
-        _set_widget_value("hf-query", query)
         _set_widget_value("hf-repo-id", STATE.hf.last_repo_id)
         _set_widget_value("hf-repo-type", STATE.hf.last_repo_type)
     lcars.notify(f"HF model search loaded for Ollama source: {query}.")
@@ -2961,6 +3242,18 @@ def _hydrate_widget_state() -> None:
     saved = UI_STATE.widget_values()
     defaults = _persisted_widget_defaults()
     choices = _persisted_widget_choices()
+    if "hf-search-repo-type" not in saved:
+        # Before the v4.2 Hub redesign, hf-repo-type was the search selector
+        # even though app.hf_repo_type tracked the selected repository. Preserve
+        # both meanings while migrating the next persisted snapshot.
+        saved["hf-search-repo-type"] = saved.get(
+            "hf-repo-type",
+            defaults["hf-search-repo-type"],
+        )
+        saved["hf-repo-type"] = UI_STATE.get(
+            "hf_repo_type",
+            defaults["hf-repo-type"],
+        )
     for widget_id in PERSISTED_WIDGET_IDS:
         value = _normalized_persisted_widget_value(
             widget_id,
@@ -2995,8 +3288,8 @@ def _persist_widget_state(session_id: str) -> None:
         UI_STATE.set_many(
             {
                 "active_config": STATE.config_store.active_name,
-                "hf_repo_id": STATE.hf.last_repo_id,
-                "hf_repo_type": STATE.hf.last_repo_type,
+                "hf_repo_id": normalized["hf-repo-id"],
+                "hf_repo_type": normalized["hf-repo-type"],
                 "hf_local_sort": STATE.hf.local_sort,
                 "hf_local_sort_desc": STATE.hf.local_sort_desc,
                 "hf_vram_limit": STATE.hf.vram_limit_gb,
@@ -3080,7 +3373,7 @@ def _enhanced_table(
     copy_columns: set[str] | None = None,
     page_size: int | None = None,
 ) -> None:
-    """Render a compact v4.1 table with native data controls and copy affordances."""
+    """Render a compact v4.2 table with native data controls and copy affordances."""
 
     filter_columns = filter_columns or set()
     numeric_columns = numeric_columns or set()

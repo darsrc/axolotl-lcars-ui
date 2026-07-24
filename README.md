@@ -29,7 +29,7 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` installs the tested LCARS WebUI v4.1.0 release tag directly from
+`requirements.txt` installs the tested LCARS WebUI v4.2.0 release tag directly from
 [darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). The tag is pinned so a future
 upstream `main` change cannot silently break this app. For local `lcars-ui` development, install
 your own checkout into the venv in editable mode after installing requirements:
@@ -71,16 +71,18 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 - Separate Axolotl action args and launcher args. Launcher args are placed after `--`, matching
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
-- LCARS WebUI v4.1 native sortable, filterable, pageable data tables with stable selection,
-  rich expandable details, linked/copyable cells, and inline actions; searchable selectors and
-  logs; typed defaults, validated persisted preferences, and atomic multi-control submissions;
-  collapsible panels; enhanced meters and charts; and confirmation prompts for process,
-  download, and cache actions.
-- Hugging Face model/dataset search with typed numeric/date sorting, local metadata filters,
-  VRAM/data-size fit, compatibility classification, stable row selection, automatic metadata
-  hydration for each visible result page, rich expandable metadata/file/lineage views, in-place
-  inspect/copy/queue/config actions, fine-tune lookup, and filtered `snapshot_download`
-  downloads into the standard HF cache.
+- LCARS WebUI v4.2 viewport-aware mosaic layouts with operator arrangement controls, stable
+  panel grouping and sizing, dense-page filler control, and native sortable, filterable,
+  pageable data tables with stable selection, rich expandable details, linked/copyable cells,
+  and inline actions; searchable selectors and logs; typed defaults, validated persisted
+  preferences, and atomic multi-control submissions; collapsible panels; enhanced meters and
+  charts; and confirmation prompts for process, download, and cache actions.
+- Hugging Face model/dataset search in an arrangeable seven-panel workspace with independent
+  search and repository-target types, typed numeric/date sorting, local metadata filters,
+  model VRAM/data-size fit, compatibility classification, stable row selection, automatic
+  metadata hydration for each visible result page, rich expandable metadata/file/lineage views,
+  in-place inspect/copy/queue/config actions, fine-tune lookup, and filtered
+  `snapshot_download` downloads into the standard HF cache.
 - Control selections (search query, filters, sort, run action and args, active config, Ollama
   model) persist to `.lcars-ui-state.json` and are restored after a browser reload or a server
   restart. Structured config values persist in the active YAML file itself.

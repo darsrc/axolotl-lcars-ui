@@ -51,7 +51,7 @@ The Setup page separates starter choices from raw Axolotl fields:
 ## LCARS WebUI
 
 This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs the
-tested v4.1.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
+tested v4.2.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
 install your checkout into the venv in editable mode after installing requirements:
 
 ```bash
@@ -62,11 +62,15 @@ uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 
 Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading private repos or pushing prepared datasets/models.
 
-The HF Hub repository table is the center of the workflow:
+The HF Hub is an arrangeable mosaic workspace. Use the rail's **Arrange** control to move or resize
+its search, sift, results, repository target, workflow, transfer, and activity panels. The
+repository table remains the center of the workflow:
 
-- Click a row to target the Repository Command panel.
-- Search submits its query, repo type, sort, limit, and VRAM value atomically, so a quick click
-  cannot execute stale control values.
+- Click a row to target the Repository Target panel.
+- Search submits its query, repo type, sort, compatibility, and limit atomically, so a quick
+  click cannot execute stale control values. Model VRAM budget lives with the local sift controls.
+- Search repo type and selected repository type are independent, so switching a search between
+  models and datasets cannot silently retarget actions for an already selected repository.
 - The visible page is inspected automatically to populate model VRAM fit or dataset size,
   weight/data formats, and exact file counts. Moving to another page hydrates that page.
 - Expand a row for its full manifest, compatibility, lineage, exact per-file sizes, related
@@ -74,7 +78,7 @@ The HF Hub repository table is the center of the workflow:
 - Repository ids and file paths have explicit copy controls; repository ids also open the
   corresponding Hugging Face page.
 - Inspection failures stay in the expanded row with a retry action.
-- Enter an `owner/repository` id in Repository Command to inspect a repo outside the current
+- Enter an `owner/repository` id in Repository Target to inspect a repo outside the current
   search results.
 
 Model downloads are filtered to Axolotl-relevant config/tokenizer/support files plus

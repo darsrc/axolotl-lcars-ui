@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from axolotl_lcars_ui.hf_manager import HuggingFaceManager, SearchResult
 
 
-class HuggingFaceManagerV41Tests(unittest.TestCase):
+class HuggingFaceManagerV42Tests(unittest.TestCase):
     def test_visible_result_hydration_populates_metadata_without_changing_selection(self) -> None:
         manager = HuggingFaceManager()
         manager.vram_limit_gb = 24
@@ -83,6 +83,23 @@ class HuggingFaceManagerV41Tests(unittest.TestCase):
         self.assertEqual(hydrated.weights, "1 compatible data file(s)")
         self.assertEqual(hydrated.quants, ".parquet")
         self.assertEqual(hydrated.file_count, 2)
+
+    def test_dataset_results_ignore_a_persisted_model_vram_fit_filter(self) -> None:
+        manager = HuggingFaceManager()
+        dataset = SearchResult(
+            repo_id="example/dataset",
+            repo_type="dataset",
+            size_bytes=2048,
+        )
+        manager.all_search_results = [dataset]
+
+        results = manager.sift_results(
+            fit_filter="fits vram",
+            vram_limit_gb=24,
+        )
+
+        self.assertEqual([result.repo_id for result in results], [dataset.repo_id])
+        self.assertEqual(results[0].fit, "2.0KB data")
 
     def test_empty_search_keeps_requested_repo_type_and_clears_stale_results(self) -> None:
         manager = HuggingFaceManager()

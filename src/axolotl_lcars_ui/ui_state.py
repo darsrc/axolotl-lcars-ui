@@ -37,6 +37,7 @@ PERSISTED_WIDGET_IDS = frozenset(
         "run-launcher-args",
         # Hugging Face search controls
         "hf-query",
+        "hf-search-repo-type",
         "hf-repo-type",
         "hf-sort",
         "hf-compatibility",
