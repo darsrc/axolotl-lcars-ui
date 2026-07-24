@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -72,6 +73,24 @@ class V4UiTests(unittest.TestCase):
         search = self.widgets["hf-query"]
         self.assertEqual(search.options.input_type, "search")
         self.assertEqual(search.options.commit, "enter")
+        search_form = self.widgets["hf-search-form"]
+        self.assertEqual(search_form.type, "form")
+        self.assertEqual(search_form.action_id, "hf-search")
+        self.assertEqual(
+            {child.id for child in search_form.children},
+            {
+                "hf-query",
+                "hf-repo-type",
+                "hf-sort",
+                "hf-compatibility",
+                "hf-limit",
+                "hf-vram-limit",
+            },
+        )
+        self.assertEqual(
+            self.widgets["run-cli-args"].options.commit,
+            "blur",
+        )
 
         selected_repo = self.widgets["hf-selected-repo-copy"]
         self.assertTrue(selected_repo.options.selectable)
@@ -86,6 +105,189 @@ class V4UiTests(unittest.TestCase):
 
         cache_delete = self.widgets["cache-delete"]
         self.assertIn("Permanently remove", cache_delete.options.confirm)
+
+    def test_config_controls_keep_defaults_and_runtime_types(self) -> None:
+        cfg = main.STATE.config_store.load()
+        for spec in main.FIELD_SPECS:
+            widget = self.widgets[spec.widget_id]
+            expected = main.STATE.config_store.control_value(spec, cfg)
+            with self.subTest(field=spec.key):
+                if spec.kind == "bool":
+                    self.assertEqual(widget.type, "toggle")
+                    self.assertIsInstance(widget.checked, bool)
+                    self.assertEqual(widget.checked, expected)
+                elif spec.kind == "number" and spec.optional:
+                    self.assertEqual(widget.type, "text_input")
+                    self.assertIsInstance(widget.value, str)
+                    self.assertEqual(widget.value, expected)
+                    self.assertIsNotNone(widget.options.validation.pattern)
+                    self.assertIn("Optional numeric value", widget.options.description)
+                elif spec.kind == "number":
+                    self.assertEqual(widget.type, "number_input")
+                    self.assertIsInstance(widget.value, float)
+                    self.assertEqual(widget.value, expected)
+                else:
+                    self.assertIsInstance(widget.value, str)
+                    self.assertEqual(widget.value, expected)
+                if widget.type == "select":
+                    self.assertIn(
+                        widget.value,
+                        [option.value for option in widget.options],
+                    )
+
+    def test_config_selects_label_unset_and_preserve_custom_yaml_values(self) -> None:
+        spec = next(
+            item
+            for item in main.FIELD_SPECS
+            if item.key == "attn_implementation"
+        )
+
+        options = main._config_select_options(
+            spec,
+            "future_attention_backend",
+        )
+
+        labels = {option.value: option.label for option in options}
+        self.assertEqual(labels[""], "Unset / Axolotl default")
+        self.assertIn("custom YAML value", labels["future_attention_backend"])
+
+    def test_persisted_preferences_are_complete_typed_and_validated(self) -> None:
+        defaults = main._persisted_widget_defaults()
+        choices = main._persisted_widget_choices()
+
+        self.assertEqual(set(defaults), set(main.PERSISTED_WIDGET_IDS))
+        self.assertEqual(
+            main._normalized_persisted_widget_value(
+                "hf-sort",
+                "removed-sort-mode",
+                defaults=defaults,
+                choices=choices,
+            ),
+            defaults["hf-sort"],
+        )
+        self.assertEqual(
+            main._normalized_persisted_widget_value(
+                "hf-vram-limit",
+                "not-a-number",
+                defaults=defaults,
+                choices=choices,
+            ),
+            defaults["hf-vram-limit"],
+        )
+        self.assertEqual(
+            main._normalized_persisted_widget_value(
+                "new-config-name",
+                "../../unsafe.yml",
+                defaults=defaults,
+                choices=choices,
+            ),
+            "experiment.yml",
+        )
+
+    def test_config_refresh_uses_checked_for_toggles_and_refreshes_choices(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "config-refresh-types"
+        try:
+            clear_session_state(session_id)
+            ctx = _LCARSContext(
+                mode=Mode.HANDLE,
+                session_id=session_id,
+            )
+            set_ctx(ctx)
+
+            main._update_config_widgets()
+
+            updates = {
+                event.payload.id: event.payload.data
+                for event in ctx.pending_events
+                if event.type == "widget_update"
+            }
+            self.assertIn("checked", updates["cfg-load-in-8bit"])
+            self.assertNotIn("value", updates["cfg-load-in-8bit"])
+            self.assertTrue(updates["active-config-select"]["options"])
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_search_hydrates_the_visible_page_before_local_filters(self) -> None:
+        original_ctx = get_ctx()
+        original_vram = main.STATE.hf.vram_limit_gb
+        session_id = "hf-visible-hydration"
+        result = SearchResult(repo_id="example/dataset", repo_type="dataset")
+        try:
+            clear_session_state(session_id)
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id="hf-search",
+                )
+            )
+            with (
+                patch.object(main.STATE.hf, "search", return_value=[result]),
+                patch.object(main.STATE.hf, "hydrate_results", return_value=1) as hydrate,
+                patch.object(main.STATE.hf, "sift_results", return_value=[result]),
+                patch.object(main, "_update_hf_widgets"),
+                patch.object(main, "_append_hf_logs"),
+            ):
+                main._hf_search_action(
+                    "example",
+                    "dataset",
+                    vram_limit=24,
+                )
+
+            hydrate.assert_called_once_with(
+                [result],
+                limit=main.HF_RESULTS_PAGE_SIZE,
+            )
+        finally:
+            main.STATE.hf.vram_limit_gb = original_vram
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_search_form_submits_visible_values_atomically(self) -> None:
+        original_ctx = get_ctx()
+        original_vram = main.STATE.hf.vram_limit_gb
+        session_id = "hf-atomic-form"
+        payload = {
+            "hf-query": "atomic dataset query",
+            "hf-repo-type": "dataset",
+            "hf-sort": "likes",
+            "hf-compatibility": "include warnings and blocked",
+            "hf-limit": "25",
+            "hf-vram-limit": 48,
+        }
+        try:
+            clear_session_state(session_id)
+            with (
+                patch.object(main.STATE.hf, "search", return_value=[]) as search,
+                patch.object(main.STATE.hf, "hydrate_results", return_value=0),
+                patch.object(main.STATE.hf, "sift_results", return_value=[]),
+                patch.object(main, "_persist_widget_state"),
+            ):
+                app = main.create_lcars_app(main.build_ui)
+                handler = app.state.plugin_action_handlers["*"]
+                asyncio.run(handler("hf-search", payload, session_id))
+
+            search.assert_called_once_with(
+                "atomic dataset query",
+                "dataset",
+                sort="likes",
+                compatible_only=False,
+                limit=25,
+            )
+            self.assertEqual(
+                get_session_state(session_id)["hf-query"],
+                "atomic dataset query",
+            )
+            self.assertEqual(
+                get_session_state(session_id)["hf-repo-type"],
+                "dataset",
+            )
+        finally:
+            main.STATE.hf.vram_limit_gb = original_vram
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
 
     def test_hf_rows_keep_typed_values_and_native_actions(self) -> None:
         original_results = main.STATE.hf.search_results
@@ -270,6 +472,46 @@ class V4UiTests(unittest.TestCase):
             main.STATE.hf.expanded_result_ids = original_expanded
             main.STATE.hf.last_repo_id = original_repo_id
             main.STATE.hf.last_repo_type = original_repo_type
+
+    def test_hf_table_page_event_hydrates_the_new_visible_slice(self) -> None:
+        original_ctx = get_ctx()
+        original_results = main.STATE.hf.search_results
+        original_expanded = list(main.STATE.hf.expanded_result_ids)
+        results = [
+            SearchResult(repo_id=f"example/dataset-{index}", repo_type="dataset")
+            for index in range(15)
+        ]
+        try:
+            main.STATE.hf.search_results = results
+            main.STATE.hf.expanded_result_ids = []
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id="table-page-hydration",
+                    active_action_id=main.HF_RESULTS_TABLE_ID,
+                    active_action_value={
+                        "kind": "page",
+                        "state": {
+                            "page": 2,
+                            "page_size": 10,
+                            "expanded_ids": [],
+                        },
+                    },
+                )
+            )
+            with (
+                patch.object(main.STATE.hf, "hydrate_results", return_value=5) as hydrate,
+                patch.object(main, "_update_hf_widgets") as update,
+                patch.object(main, "_append_hf_logs"),
+            ):
+                main._handle_hf_table_action()
+
+            hydrate.assert_called_once_with(results[10:15], limit=10)
+            update.assert_called_once_with()
+        finally:
+            set_ctx(original_ctx)
+            main.STATE.hf.search_results = original_results
+            main.STATE.hf.expanded_result_ids = original_expanded
 
     def test_empty_dataset_search_does_not_reset_repo_type_to_model(self) -> None:
         original_ctx = get_ctx()

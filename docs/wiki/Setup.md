@@ -65,8 +65,12 @@ Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading privat
 The HF Hub repository table is the center of the workflow:
 
 - Click a row to target the Repository Command panel.
-- Expand a row to inspect its manifest on demand. The expansion shows compatibility, lineage,
-  exact file sizes, related fine-tunes, and inline config/download actions.
+- Search submits its query, repo type, sort, limit, and VRAM value atomically, so a quick click
+  cannot execute stale control values.
+- The visible page is inspected automatically to populate model VRAM fit or dataset size,
+  weight/data formats, and exact file counts. Moving to another page hydrates that page.
+- Expand a row for its full manifest, compatibility, lineage, exact per-file sizes, related
+  fine-tunes, and inline config/download actions.
 - Repository ids and file paths have explicit copy controls; repository ids also open the
   corresponding Hugging Face page.
 - Inspection failures stay in the expanded row with a retry action.

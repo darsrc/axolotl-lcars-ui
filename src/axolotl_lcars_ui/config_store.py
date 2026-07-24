@@ -790,10 +790,22 @@ class ConfigStore:
         if value is None:
             return spec.default if spec.default is not None else ""
         if spec.kind == "bool":
-            return bool(value)
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+            return bool(spec.default)
         if spec.kind == "tri_bool":
             if isinstance(value, bool):
                 return "true" if value else "false"
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return "true"
+            if text in {"0", "false", "no", "off"}:
+                return "false"
             return "unset"
         if spec.kind == "csv_list":
             if isinstance(value, list):
@@ -807,9 +819,33 @@ class ConfigStore:
             return "true" if value else "false"
         return value
 
+    def control_value(self, spec: FieldSpec, cfg: dict[str, Any] | None = None) -> Any:
+        """Return the exact runtime type expected by the rendered LCARS control."""
+
+        value = self.field_value(spec, cfg)
+        if spec.kind in {"text", "csv_list", "json"}:
+            return "" if value is None else str(value)
+        if spec.kind == "number":
+            if value in (None, ""):
+                return "" if spec.optional else float(spec.default or 0)
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return "" if spec.optional else float(spec.default or 0)
+            if spec.optional:
+                if number.is_integer() and spec.step >= 1:
+                    return str(int(number))
+                return f"{number:.15f}".rstrip("0").rstrip(".")
+            return number
+        if spec.kind == "bool":
+            return bool(value)
+        if spec.kind == "tri_bool":
+            return value if value in {"unset", "true", "false"} else "unset"
+        return "" if value is None else str(value)
+
     def editor_values(self) -> dict[str, Any]:
         cfg = self.load()
-        return {spec.widget_id: self.field_value(spec, cfg) for spec in FIELD_SPECS}
+        return {spec.widget_id: self.control_value(spec, cfg) for spec in FIELD_SPECS}
 
     def save_editor_values(self, values: dict[str, Any]) -> None:
         cfg = self.load()

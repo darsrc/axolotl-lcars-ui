@@ -13,11 +13,13 @@ It is built with the pinned v4.1.0 release of
 - Axolotl CLI process launch, stop, and log monitoring.
 - CPU, RAM, disk, GPU, top-process, GPU-process, and storage-hotspot telemetry.
 - Native v4.1 sortable/filterable/pageable tables with stable selection, rich expansion,
-  linked/copyable cells and inline actions; searchable controls and logs; validated inputs;
-  collapsible panels; richer telemetry; and confirmation prompts for consequential actions.
+  linked/copyable cells and inline actions; searchable controls and logs; typed defaults,
+  validated preferences, and atomic form submissions; collapsible panels; richer telemetry;
+  and confirmation prompts for consequential actions.
 - Hugging Face model and dataset search/download/cache management with typed result sorting,
-  stable row selection, lazy rich repository expansion, in-place inspect/copy/queue/config
-  actions, local metadata filters, VRAM-fit filtering, file compatibility, and fine-tune lookup.
+  stable row selection, automatic visible-page metadata hydration, rich repository expansion,
+  in-place inspect/copy/queue/config actions, local metadata filters, model VRAM fit, dataset
+  size, file compatibility, and fine-tune lookup.
 - Ollama model detection with local-source apply or Hugging Face source search.
 - Control selections persist across browser reloads and server restarts via
   `.lcars-ui-state.json`; structured config values persist in the active YAML file.

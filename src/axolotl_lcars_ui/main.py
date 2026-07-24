@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import html
+import math
 import threading
 import webbrowser
 from dataclasses import dataclass, field
@@ -46,13 +47,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_AXOLOTL = "axolotl-run-log"
 LOG_HF = "hf-log"
 HF_RESULTS_TABLE_ID = "hf-results-table"
+HF_RESULTS_PAGE_SIZE = 10
 SEARCH_INPUT_OPTIONS = lcars.TextInputOptions(
     input_type="search",
     commit="enter",
     debounce_ms=250,
 )
 COMMAND_INPUT_OPTIONS = lcars.TextInputOptions(
-    commit="enter",
+    commit="blur",
     debounce_ms=250,
 )
 SEARCHABLE_CHOICES = lcars.ChoiceOptions(searchable=True)
@@ -274,6 +276,107 @@ STATE.preflight = AxolotlPreflight(PROJECT_ROOT, STATE.ollama)
 UI_STATE = UiStateStore(PROJECT_ROOT)
 
 
+def _persisted_widget_defaults() -> dict[str, Any]:
+    """Typed fallbacks for every preference mirrored outside the active YAML."""
+
+    ollama_name = (
+        STATE.ollama.selected.name
+        if STATE.ollama.selected is not None
+        else (STATE.ollama.models[0].name if STATE.ollama.models else "")
+    )
+    return {
+        "active-config-select": STATE.config_store.active_name,
+        "new-config-name": "experiment.yml",
+        "setup-recipe": next(iter(SETUP_RECIPES)),
+        "setup-model-preset": MODEL_PRESETS[0],
+        "setup-dataset-preset": next(iter(DATASET_PRESETS)),
+        "run-action": "train",
+        "run-launcher": "",
+        "run-cli-args": "",
+        "run-launcher-args": "",
+        "hf-query": "llama instruct",
+        "hf-repo-type": STATE.hf.last_repo_type,
+        "hf-sort": HF_SORT_OPTIONS[0],
+        "hf-compatibility": HF_COMPATIBILITY_OPTIONS[0],
+        "hf-limit": HF_LIMIT_OPTIONS[0],
+        "hf-vram-limit": float(STATE.hf.vram_limit_gb or 24),
+        "hf-sift": "",
+        "hf-artifact-filter": HF_ARTIFACT_FILTER_OPTIONS[0],
+        "hf-quant-filter": HF_QUANT_FILTER_OPTIONS[0],
+        "hf-fit-filter": HF_FIT_FILTER_OPTIONS[0],
+        "hf-repo-id": STATE.hf.last_repo_id,
+        "hf-revision": "",
+        "delete-repo-id": STATE.hf.last_repo_id,
+        "delete-repo-type": STATE.hf.last_repo_type,
+        "ollama-model-name": ollama_name,
+    }
+
+
+def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
+    return {
+        "active-config-select": tuple(STATE.config_store.list_configs()),
+        "setup-recipe": tuple(SETUP_RECIPES),
+        "setup-model-preset": tuple(MODEL_PRESETS),
+        "setup-dataset-preset": tuple(DATASET_PRESETS),
+        "run-action": tuple(AXOLOTL_ACTIONS),
+        "run-launcher": ("", "python", "accelerate", "torchrun"),
+        "hf-repo-type": ("model", "dataset"),
+        "hf-sort": tuple(HF_SORT_OPTIONS),
+        "hf-compatibility": tuple(HF_COMPATIBILITY_OPTIONS),
+        "hf-limit": tuple(HF_LIMIT_OPTIONS),
+        "hf-artifact-filter": tuple(HF_ARTIFACT_FILTER_OPTIONS),
+        "hf-quant-filter": tuple(HF_QUANT_FILTER_OPTIONS),
+        "hf-fit-filter": tuple(HF_FIT_FILTER_OPTIONS),
+        "delete-repo-type": ("model", "dataset"),
+    }
+
+
+def _normalized_persisted_widget_value(
+    widget_id: str,
+    value: Any,
+    *,
+    defaults: dict[str, Any] | None = None,
+    choices: dict[str, tuple[str, ...]] | None = None,
+) -> Any:
+    """Reject stale or malformed preferences before they reach LCARS controls."""
+
+    defaults = defaults or _persisted_widget_defaults()
+    choices = choices or _persisted_widget_choices()
+    default = defaults[widget_id]
+    if widget_id == "hf-vram-limit":
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not math.isfinite(number):
+            return float(default)
+        return max(1.0, min(256.0, number))
+    if widget_id in choices:
+        selected = str(value) if value is not None else str(default)
+        return selected if selected in choices[widget_id] else default
+    if value is None or isinstance(value, (dict, list, tuple, set)):
+        return str(default)
+    text = str(value)
+    limits = {
+        "new-config-name": 128,
+        "run-cli-args": 4096,
+        "run-launcher-args": 4096,
+        "hf-query": 512,
+        "hf-sift": 512,
+        "hf-repo-id": 512,
+        "hf-revision": 256,
+        "delete-repo-id": 512,
+        "ollama-model-name": 512,
+    }
+    if len(text) > limits.get(widget_id, 1024):
+        return str(default)
+    if widget_id == "new-config-name" and (
+        not text.endswith((".yml", ".yaml")) or "/" in text or "\\" in text
+    ):
+        return str(default)
+    return text
+
+
 def _restore_persisted_state() -> None:
     """Replay saved selections into the managers that own them."""
 
@@ -284,7 +387,16 @@ def _restore_persisted_state() -> None:
         except ConfigError:
             UI_STATE.set("active_config", STATE.config_store.active_name)
 
-    repo_type = str(UI_STATE.get("hf_repo_type", "") or "")
+    saved_widgets = UI_STATE.widget_values()
+    repo_type = str(
+        _normalized_persisted_widget_value(
+            "hf-repo-type",
+            saved_widgets.get(
+                "hf-repo-type",
+                UI_STATE.get("hf_repo_type", STATE.hf.last_repo_type),
+            ),
+        )
+    )
     if repo_type in {"model", "dataset"}:
         STATE.hf.last_repo_type = repo_type  # type: ignore[assignment]
     STATE.hf.last_repo_id = str(UI_STATE.get("hf_repo_id", "") or "")
@@ -443,32 +555,46 @@ def _config_page() -> None:
             )
             with lcars.control_panel("Config Files", color="golden-tanoi"):
                 configs = STATE.config_store.list_configs()
-                selected = lcars.select(
-                    "Active Config",
-                    configs,
-                    value=STATE.config_store.active_name,
-                    id="active-config-select",
-                    settings=SEARCHABLE_CHOICES,
-                )
-                _seed_text("new-config-name", "experiment.yml")
-                new_name = lcars.text_input(
-                    "New Config Name",
-                    value="experiment.yml",
-                    placeholder="experiment.yml",
-                    autocomplete=False,
-                    id="new-config-name",
-                    options=lcars.TextInputOptions(
-                        commit="enter",
-                        validation=lcars.ValidationOptions(
-                            required=True,
-                            pattern=r"^[^/\\]+\.ya?ml$",
-                            message="Use a YAML filename without directories.",
-                        ),
-                    ),
-                )
-                if lcars.button("Switch Config", color="anakiwa", id="config-switch"):
+                with lcars.form(
+                    "Active Config Selection",
+                    action_id="config-switch",
+                    submit_label="Switch Config",
+                    id="config-switch-form",
+                    color="anakiwa",
+                ):
+                    selected = lcars.select(
+                        "Active Config",
+                        configs,
+                        value=STATE.config_store.active_name,
+                        id="active-config-select",
+                        settings=SEARCHABLE_CHOICES,
+                    )
+                if _is_active_action("config-switch"):
                     _switch_config_action(selected)
-                if lcars.button("Create Starter", color="tanoi", id="config-create"):
+                with lcars.form(
+                    "New Starter Config",
+                    action_id="config-create",
+                    submit_label="Create Starter",
+                    id="config-create-form",
+                    color="tanoi",
+                ):
+                    _seed_text("new-config-name", "experiment.yml")
+                    new_name = lcars.text_input(
+                        "New Config Name",
+                        value="experiment.yml",
+                        placeholder="experiment.yml",
+                        autocomplete=False,
+                        id="new-config-name",
+                        options=lcars.TextInputOptions(
+                            commit="enter",
+                            validation=lcars.ValidationOptions(
+                                required=True,
+                                pattern=r"^[^/\\]+\.ya?ml$",
+                                message="Use a YAML filename without directories.",
+                            ),
+                        ),
+                    )
+                if _is_active_action("config-create"):
                     _create_config_action(new_name)
                 if lcars.button("Duplicate Active", color="lilac", id="config-duplicate"):
                     _duplicate_config_action()
@@ -795,45 +921,53 @@ def _hub_page() -> None:
             id="search-command",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
-            _seed_text("hf-query", "llama instruct")
-            query = lcars.text_input(
-                "Search",
-                value="llama instruct",
-                placeholder="model or dataset query",
-                autocomplete=False,
-                id="hf-query",
-                options=SEARCH_INPUT_OPTIONS,
-            )
-            repo_type = lcars.select(
-                "Repo Type",
-                ["model", "dataset"],
-                value=STATE.hf.last_repo_type,
-                id="hf-repo-type",
-            )
-            sort = lcars.select("HF Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
-            compatibility = lcars.select(
-                "Browse Filter",
-                HF_COMPATIBILITY_OPTIONS,
-                value=HF_COMPATIBILITY_OPTIONS[0],
-                id="hf-compatibility",
-            )
-            limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
-            vram_limit = lcars.number_input(
-                "VRAM Limit [filter]",
-                value=float(STATE.hf.vram_limit_gb or 24),
-                min=1,
-                max=256,
-                step=1,
-                id="hf-vram-limit",
-                options=lcars.NumberInputOptions(
-                    precision=0,
-                    suffix=" GB",
-                    required=True,
-                ),
-            )
+            with lcars.form(
+                "Hugging Face Search",
+                action_id="hf-search",
+                submit_label="Run Search",
+                id="hf-search-form",
+                color="anakiwa",
+                options=lcars.FormOptions(layout="grid", columns=2),
+            ):
+                _seed_text("hf-query", "llama instruct")
+                query = lcars.text_input(
+                    "Search",
+                    value="llama instruct",
+                    placeholder="model or dataset query",
+                    autocomplete=False,
+                    id="hf-query",
+                    options=SEARCH_INPUT_OPTIONS,
+                )
+                repo_type = lcars.select(
+                    "Repo Type",
+                    ["model", "dataset"],
+                    value=STATE.hf.last_repo_type,
+                    id="hf-repo-type",
+                )
+                sort = lcars.select("HF Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
+                compatibility = lcars.select(
+                    "Browse Filter",
+                    HF_COMPATIBILITY_OPTIONS,
+                    value=HF_COMPATIBILITY_OPTIONS[0],
+                    id="hf-compatibility",
+                )
+                limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
+                vram_limit = lcars.number_input(
+                    "VRAM Limit [filter]",
+                    value=float(STATE.hf.vram_limit_gb or 24),
+                    min=1,
+                    max=256,
+                    step=1,
+                    id="hf-vram-limit",
+                    options=lcars.NumberInputOptions(
+                        precision=0,
+                        suffix=" GB",
+                        required=True,
+                    ),
+                )
             # The sift controls are rendered below, so their live values are read from
             # session state instead of the (not yet assigned) widget returns.
-            if lcars.button("Run Search", color="anakiwa", id="hf-search") or _is_active_action("hf-query"):
+            if _is_active_action("hf-search") or _is_active_action("hf-query"):
                 _hf_search_action(
                     query,
                     repo_type,
@@ -1268,7 +1402,7 @@ def _hf_result_table_options() -> lcars.TableOptions:
             ),
         ],
         sort=[lcars.TableSort(key=sort_key, direction=direction)],
-        pagination=lcars.TablePagination(page_size=10),
+        pagination=lcars.TablePagination(page_size=HF_RESULTS_PAGE_SIZE),
         selection=lcars.TableSelection(mode="single", selected_ids=selected_ids),
         expanded_ids=expanded_ids,
         expandable=True,
@@ -1406,7 +1540,11 @@ def _hf_result_detail_content(
         content.append(
             lcars.TableDetailStatus(
                 status="ok" if result.fit.startswith("fits") else "muted",
-                label=f"VRAM · {result.fit}",
+                label=(
+                    f"Data · {result.fit}"
+                    if result.repo_type == "dataset"
+                    else f"VRAM · {result.fit}"
+                ),
             )
         )
     if configured:
@@ -1719,6 +1857,29 @@ def _handle_hf_table_action() -> None:
                 if direction in {"asc", "desc"}:
                     _hf_sort_action(sort_key, descending=direction == "desc")
             return
+
+        if kind == "page":
+            page = _bounded_int(
+                str(table_state.get("page") or 1),
+                default=1,
+                minimum=1,
+                maximum=1000,
+            )
+            page_size = _bounded_int(
+                str(table_state.get("page_size") or HF_RESULTS_PAGE_SIZE),
+                default=HF_RESULTS_PAGE_SIZE,
+                minimum=1,
+                maximum=50,
+            )
+            start = (page - 1) * page_size
+            attempted = STATE.hf.hydrate_results(
+                STATE.hf.search_results[start : start + page_size],
+                limit=page_size,
+            )
+            if attempted:
+                _update_hf_widgets()
+                _append_hf_logs()
+            return
         return
 
     if _is_active_action("hf-inspect-row"):
@@ -1824,7 +1985,7 @@ def _render_config_fields(
 
 
 def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
-    value = STATE.config_store.field_value(spec, cfg)
+    value = STATE.config_store.control_value(spec, cfg)
     label = _field_label(spec)
     if spec.kind in {"text", "csv_list", "json"}:
         # force: the active YAML owns config values, so a rebuilt manifest must not
@@ -1833,6 +1994,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
         if spec.kind == "json":
             return lcars.text_input(
                 label,
+                value=str(value),
                 placeholder=spec.placeholder or "{key: value}",
                 autocomplete=False,
                 id=spec.widget_id,
@@ -1846,6 +2008,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             )
         return lcars.text_input(
             label,
+            value=str(value),
             placeholder=spec.placeholder,
             autocomplete=False,
             id=spec.widget_id,
@@ -1860,11 +2023,16 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             _seed_text(spec.widget_id, "" if value in (None, "") else str(value), force=True)
             return lcars.text_input(
                 label,
+                value=str(value),
                 placeholder=spec.placeholder or "unset",
                 autocomplete=False,
                 id=spec.widget_id,
                 options=lcars.TextInputOptions(
                     input_type="text",
+                    description=(
+                        f"Optional numeric value; leave blank for the Axolotl default. "
+                        f"Step: {spec.step:g}."
+                    ),
                     validation=lcars.ValidationOptions(
                         pattern=r"^-?(?:\d+(?:\.\d*)?|\.\d+)?$",
                         message="Enter a number or leave the field empty.",
@@ -1873,7 +2041,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             )
         return lcars.number_input(
             label,
-            value=float(value if value not in ("", None) else spec.default or 0),
+            value=float(value),
             min=spec.minimum,
             max=spec.maximum,
             step=spec.step,
@@ -1905,15 +2073,38 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             id=spec.widget_id,
         )
     selected = str(value if value not in (None, "") else (spec.default or ""))
-    if spec.options and selected not in spec.options:
-        selected = ""
     return lcars.select(
         label,
-        list(spec.options),
+        _config_select_options(spec, selected),
         value=selected,
         id=spec.widget_id,
         settings=SEARCHABLE_CHOICES if len(spec.options) > 6 else None,
     )
+
+
+def _config_select_options(
+    spec: FieldSpec,
+    selected: str,
+) -> list[lcars.SelectOption]:
+    """Label unset choices and preserve custom YAML values instead of blanking."""
+
+    options = [
+        lcars.SelectOption(
+            label="Unset / Axolotl default" if value == "" else value,
+            value=value,
+        )
+        for value in spec.options
+    ]
+    if selected and selected not in spec.options:
+        options.insert(
+            0,
+            lcars.SelectOption(
+                label=f"{selected} · custom YAML value",
+                value=selected,
+                description="Preserved from the active config.",
+            ),
+        )
+    return options
 
 
 def _field_label(spec: FieldSpec) -> str:
@@ -2004,6 +2195,8 @@ def _duplicate_config_action() -> None:
     try:
         new_name = STATE.config_store.create_copy("copy-of-" + STATE.config_store.active_name)
         lcars.notify(f"Created config {new_name}.")
+        _update_config_widgets()
+        _run_preflight_action()
     except Exception as exc:
         lcars.notify(f"Could not duplicate config: {exc}", level="error")
 
@@ -2124,6 +2317,8 @@ def _hf_search_action(
         compatible_only=compatibility == HF_COMPATIBILITY_OPTIONS[0],
         limit=_bounded_int(limit, default=12, minimum=1, maximum=50),
     )
+    STATE.hf.vram_limit_gb = vram
+    STATE.hf.hydrate_results(results, limit=HF_RESULTS_PAGE_SIZE)
     results = STATE.hf.sift_results(
         text=sift,
         sort=local_sort,
@@ -2408,15 +2603,38 @@ def _update_config_widgets() -> None:
     lcars.update("config-summary-table", **payload)
     lcars.update("config-page-summary-table", **payload)
     lcars.update("config-coverage-table", **_table_payload(_coverage_rows()))
-    lcars.update("active-config-select", value=STATE.config_store.active_name)
+    configs = STATE.config_store.list_configs()
+    lcars.update(
+        "active-config-select",
+        value=STATE.config_store.active_name,
+        options=[
+            lcars.SelectOption(label=name, value=name).model_dump(mode="json")
+            for name in configs
+        ],
+    )
     try:
         values = STATE.config_store.editor_values()
     except Exception:
         return
     store = get_session_state(get_ctx().session_id)
-    for widget_id, value in values.items():
+    store["active-config-select"] = STATE.config_store.active_name
+    for spec in FIELD_SPECS:
+        widget_id = spec.widget_id
+        value = values[widget_id]
         store[widget_id] = value
-        lcars.update(widget_id, value=value)
+        if spec.kind == "bool":
+            lcars.update(widget_id, checked=value)
+        elif spec.kind == "select":
+            lcars.update(
+                widget_id,
+                value=value,
+                options=[
+                    option.model_dump(mode="json")
+                    for option in _config_select_options(spec, str(value))
+                ],
+            )
+        else:
+            lcars.update(widget_id, value=value)
     lcars.update(
         "setup-defaults-table",
         **_table_payload(_setup_default_rows(), copy_columns={"Field"}),
@@ -2740,9 +2958,16 @@ def _hydrate_widget_state() -> None:
 
     ctx = get_ctx()
     store = get_session_state(ctx.session_id)
-    for widget_id, value in UI_STATE.widget_values().items():
-        if widget_id not in PERSISTED_WIDGET_IDS:
-            continue
+    saved = UI_STATE.widget_values()
+    defaults = _persisted_widget_defaults()
+    choices = _persisted_widget_choices()
+    for widget_id in PERSISTED_WIDGET_IDS:
+        value = _normalized_persisted_widget_value(
+            widget_id,
+            saved.get(widget_id, defaults[widget_id]),
+            defaults=defaults,
+            choices=choices,
+        )
         if ctx.mode == Mode.BUILD:
             store[widget_id] = value
         else:
@@ -2752,7 +2977,20 @@ def _hydrate_widget_state() -> None:
 def _persist_widget_state(session_id: str) -> None:
     """Snapshot a session's control values and cross-page selections to disk."""
 
-    changed = UI_STATE.remember_widgets(get_session_state(session_id))
+    store = get_session_state(session_id)
+    defaults = _persisted_widget_defaults()
+    choices = _persisted_widget_choices()
+    normalized = {
+        widget_id: _normalized_persisted_widget_value(
+            widget_id,
+            store.get(widget_id, defaults[widget_id]),
+            defaults=defaults,
+            choices=choices,
+        )
+        for widget_id in PERSISTED_WIDGET_IDS
+    }
+    store.update(normalized)
+    changed = UI_STATE.remember_widgets(normalized)
     changed = (
         UI_STATE.set_many(
             {

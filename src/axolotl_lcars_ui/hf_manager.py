@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -180,17 +181,23 @@ class HuggingFaceManager:
         """Replace the active search without letting its repo type go stale."""
 
         with self._lock:
-            self.all_search_results = results
-            self.search_results = results
+            stored_results = []
+            for result in results:
+                details = self.repo_details.get(
+                    (result.repo_type, result.repo_id)
+                )
+                stored_results.append(details.result if details is not None else result)
+            self.all_search_results = stored_results
+            self.search_results = stored_results
             self.related_results = []
             self.related_repo_id = ""
             self.selected_details = None
             self.expanded_result_ids = []
             self.last_repo_type = repo_type
-            if results:
-                self.last_repo_id = results[0].repo_id
+            if stored_results:
+                self.last_repo_id = stored_results[0].repo_id
                 self.selected_details = self.repo_details.get(
-                    (repo_type, results[0].repo_id)
+                    (repo_type, stored_results[0].repo_id)
                 )
             else:
                 self.last_repo_id = ""
@@ -285,6 +292,7 @@ class HuggingFaceManager:
         repo_type: RepoType,
         *,
         revision: str | None = None,
+        select: bool = True,
     ) -> RepoDetails | None:
         repo_id = repo_id.strip()
         if not repo_id:
@@ -329,11 +337,59 @@ class HuggingFaceManager:
             self.all_search_results = _replace_result(self.all_search_results, result)
             self.search_results = _replace_result(self.search_results, result)
             self.related_results = _replace_result(self.related_results, result)
-            self.selected_details = details
-            self.last_repo_id = repo_id
-            self.last_repo_type = repo_type
+            if select:
+                self.last_repo_id = repo_id
+                self.last_repo_type = repo_type
+            if (
+                self.last_repo_id == repo_id
+                and self.last_repo_type == repo_type
+            ):
+                self.selected_details = details
         self.log(f"Inspect found {len(files)} file(s) for {repo_id}.")
         return details
+
+    def hydrate_results(
+        self,
+        results: list[SearchResult],
+        *,
+        limit: int = 10,
+        max_workers: int = 4,
+    ) -> int:
+        """Populate exact file metadata for a bounded set of visible results."""
+
+        candidates: list[SearchResult] = []
+        with self._lock:
+            for result in list(results)[: max(0, limit)]:
+                key = (result.repo_type, result.repo_id)
+                if key in self.repo_details or key in self.inspection_errors:
+                    continue
+                candidates.append(result)
+        if not candidates:
+            return 0
+
+        workers = max(1, min(max_workers, len(candidates)))
+
+        def hydrate(result: SearchResult) -> RepoDetails | None:
+            return self.inspect_repo(
+                result.repo_id,
+                result.repo_type,
+                select=False,
+            )
+
+        if workers == 1:
+            hydrated = [hydrate(result) for result in candidates]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="hf-metadata",
+            ) as executor:
+                hydrated = list(executor.map(hydrate, candidates))
+        successful = sum(details is not None for details in hydrated)
+        self.log(
+            f"Hydrated metadata for {successful}/{len(candidates)} visible "
+            "Hugging Face result(s)."
+        )
+        return len(candidates)
 
     def details_for(self, repo_id: str, repo_type: RepoType) -> RepoDetails | None:
         with self._lock:
@@ -662,7 +718,11 @@ class HuggingFaceManager:
             role=classification["role"],
             weights=classification["weights"],
             quants=classification["quants"],
-            fit=_fit_label(weight_bytes, self.vram_limit_gb),
+            fit=(
+                _dataset_fit_label(size)
+                if repo_type == "dataset"
+                else _fit_label(weight_bytes, self.vram_limit_gb)
+            ),
             compatibility=classification["compatibility"],
             blocked=classification["blocked"] == "true",
         )
@@ -937,8 +997,15 @@ def _filter_haystack(item: SearchResult) -> str:
 
 
 def _with_fit(item: SearchResult, vram_limit_gb: float | None) -> SearchResult:
-    item.fit = _fit_label(item.weight_bytes or item.size_bytes, vram_limit_gb)
+    if item.repo_type == "dataset":
+        item.fit = _dataset_fit_label(item.size_bytes)
+    else:
+        item.fit = _fit_label(item.weight_bytes or item.size_bytes, vram_limit_gb)
     return item
+
+
+def _dataset_fit_label(size_bytes: int) -> str:
+    return f"{format_bytes(size_bytes)} data" if size_bytes > 0 else "unknown"
 
 
 def _fit_label(size_bytes: int, vram_limit_gb: float | None) -> str:

@@ -73,13 +73,14 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
 - LCARS WebUI v4.1 native sortable, filterable, pageable data tables with stable selection,
   rich expandable details, linked/copyable cells, and inline actions; searchable selectors and
-  logs; validated/enter-to-commit inputs; collapsible panels; enhanced meters and charts; and
-  confirmation prompts for process, download, and cache actions.
+  logs; typed defaults, validated persisted preferences, and atomic multi-control submissions;
+  collapsible panels; enhanced meters and charts; and confirmation prompts for process,
+  download, and cache actions.
 - Hugging Face model/dataset search with typed numeric/date sorting, local metadata filters,
-  VRAM-fit filtering, compatibility classification, stable row selection, lazy repository
-  inspection, rich expandable metadata/file/lineage views, in-place inspect/copy/queue/config
-  actions, fine-tune lookup, and filtered `snapshot_download` downloads into the standard HF
-  cache.
+  VRAM/data-size fit, compatibility classification, stable row selection, automatic metadata
+  hydration for each visible result page, rich expandable metadata/file/lineage views, in-place
+  inspect/copy/queue/config actions, fine-tune lookup, and filtered `snapshot_download`
+  downloads into the standard HF cache.
 - Control selections (search query, filters, sort, run action and args, active config, Ollama
   model) persist to `.lcars-ui-state.json` and are restored after a browser reload or a server
   restart. Structured config values persist in the active YAML file itself.
