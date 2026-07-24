@@ -2133,9 +2133,9 @@ def _hf_search_action(
         fit_filter=fit_filter,
         vram_limit_gb=vram,
     )
+    _set_widget_value("hf-repo-type", repo_type)
     if results:
         _set_widget_value("hf-repo-id", STATE.hf.last_repo_id)
-        _set_widget_value("hf-repo-type", STATE.hf.last_repo_type)
     _update_hf_widgets()
     _append_hf_logs()
 

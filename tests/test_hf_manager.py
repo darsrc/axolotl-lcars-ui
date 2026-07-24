@@ -8,6 +8,42 @@ from axolotl_lcars_ui.hf_manager import HuggingFaceManager, SearchResult
 
 
 class HuggingFaceManagerV41Tests(unittest.TestCase):
+    def test_empty_search_keeps_requested_repo_type_and_clears_stale_results(self) -> None:
+        manager = HuggingFaceManager()
+        stale = SearchResult(repo_id="example/model", repo_type="model")
+        manager.all_search_results = [stale]
+        manager.search_results = [stale]
+        manager.last_repo_id = stale.repo_id
+        manager.last_repo_type = stale.repo_type
+        manager._list_datasets = Mock(return_value=[])  # type: ignore[method-assign]
+
+        results = manager.search("no dataset matches", "dataset")
+
+        self.assertEqual(results, [])
+        self.assertEqual(manager.all_search_results, [])
+        self.assertEqual(manager.search_results, [])
+        self.assertEqual(manager.last_repo_id, "")
+        self.assertEqual(manager.last_repo_type, "dataset")
+
+    def test_failed_search_does_not_restore_results_from_previous_repo_type(self) -> None:
+        manager = HuggingFaceManager()
+        stale = SearchResult(repo_id="example/model", repo_type="model")
+        manager.all_search_results = [stale]
+        manager.search_results = [stale]
+        manager.last_repo_id = stale.repo_id
+        manager.last_repo_type = stale.repo_type
+        manager._list_datasets = Mock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("dataset search unavailable")
+        )
+
+        results = manager.search("dataset query", "dataset")
+
+        self.assertEqual(results, [])
+        self.assertEqual(manager.all_search_results, [])
+        self.assertEqual(manager.search_results, [])
+        self.assertEqual(manager.last_repo_id, "")
+        self.assertEqual(manager.last_repo_type, "dataset")
+
     def test_inspection_is_cached_and_reconciles_search_metadata(self) -> None:
         manager = HuggingFaceManager()
         lightweight = SearchResult(repo_id="example/model", repo_type="model")

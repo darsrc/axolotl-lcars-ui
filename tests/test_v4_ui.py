@@ -7,7 +7,14 @@ import lcars_ui as lcars
 
 from axolotl_lcars_ui import main
 from axolotl_lcars_ui.hf_manager import RepoDetails, RepoFile, SearchResult
-from lcars_ui.dsl._state import Mode, _LCARSContext, get_ctx, set_ctx
+from lcars_ui.dsl._state import (
+    Mode,
+    _LCARSContext,
+    clear_session_state,
+    get_ctx,
+    get_session_state,
+    set_ctx,
+)
 
 
 def _manifest_widgets(manifest: object) -> dict[str, object]:
@@ -260,6 +267,54 @@ class V4UiTests(unittest.TestCase):
             main.STATE.hf.search_results = original_results
             main.STATE.hf.selected_details = original_details
             main.STATE.hf.repo_details = original_detail_cache
+            main.STATE.hf.expanded_result_ids = original_expanded
+            main.STATE.hf.last_repo_id = original_repo_id
+            main.STATE.hf.last_repo_type = original_repo_type
+
+    def test_empty_dataset_search_does_not_reset_repo_type_to_model(self) -> None:
+        original_ctx = get_ctx()
+        original_all_results = main.STATE.hf.all_search_results
+        original_results = main.STATE.hf.search_results
+        original_related_results = main.STATE.hf.related_results
+        original_related_repo_id = main.STATE.hf.related_repo_id
+        original_details = main.STATE.hf.selected_details
+        original_expanded = list(main.STATE.hf.expanded_result_ids)
+        original_repo_id = main.STATE.hf.last_repo_id
+        original_repo_type = main.STATE.hf.last_repo_type
+        stale = SearchResult(repo_id="example/model", repo_type="model")
+        session_id = "empty-dataset-search"
+        try:
+            main.STATE.hf.all_search_results = [stale]
+            main.STATE.hf.search_results = [stale]
+            main.STATE.hf.selected_details = None
+            main.STATE.hf.expanded_result_ids = []
+            main.STATE.hf.last_repo_id = stale.repo_id
+            main.STATE.hf.last_repo_type = stale.repo_type
+            clear_session_state(session_id)
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id="hf-search",
+                )
+            )
+            with patch.object(main.STATE.hf, "_list_datasets", return_value=[]):
+                main._hf_search_action("no dataset matches", "dataset")
+
+            self.assertEqual(main.STATE.hf.last_repo_type, "dataset")
+            self.assertEqual(main.STATE.hf.last_repo_id, "")
+            self.assertEqual(
+                get_session_state(session_id)["hf-repo-type"],
+                "dataset",
+            )
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+            main.STATE.hf.all_search_results = original_all_results
+            main.STATE.hf.search_results = original_results
+            main.STATE.hf.related_results = original_related_results
+            main.STATE.hf.related_repo_id = original_related_repo_id
+            main.STATE.hf.selected_details = original_details
             main.STATE.hf.expanded_result_ids = original_expanded
             main.STATE.hf.last_repo_id = original_repo_id
             main.STATE.hf.last_repo_type = original_repo_type

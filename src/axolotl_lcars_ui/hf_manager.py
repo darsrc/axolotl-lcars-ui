@@ -147,8 +147,9 @@ class HuggingFaceManager:
     ) -> list[SearchResult]:
         query = query.strip()
         if not query:
+            self._store_search_results([], repo_type)
             self.log("Search skipped: empty query.")
-            return self.search_results
+            return []
         sort = _normalize_sort(sort)
         self.log(f"Searching Hugging Face {repo_type}s for {query!r} sorted by {sort}.")
         try:
@@ -164,7 +165,19 @@ class HuggingFaceManager:
                 self.log(f"HF search failed with sort={sort}: {exc}; retrying downloads sort.")
                 return self.search(query, repo_type, limit=limit, sort="downloads", compatible_only=compatible_only)
             self.log(f"HF search failed: {exc}")
-            return self.search_results
+            self._store_search_results([], repo_type)
+            return []
+
+        self._store_search_results(results, repo_type)
+        self.log(f"Search returned {len(results)} {repo_type} result(s).")
+        return results
+
+    def _store_search_results(
+        self,
+        results: list[SearchResult],
+        repo_type: RepoType,
+    ) -> None:
+        """Replace the active search without letting its repo type go stale."""
 
         with self._lock:
             self.all_search_results = results
@@ -173,12 +186,14 @@ class HuggingFaceManager:
             self.related_repo_id = ""
             self.selected_details = None
             self.expanded_result_ids = []
+            self.last_repo_type = repo_type
             if results:
                 self.last_repo_id = results[0].repo_id
-                self.last_repo_type = repo_type
-                self.selected_details = self.repo_details.get((repo_type, results[0].repo_id))
-        self.log(f"Search returned {len(results)} {repo_type} result(s).")
-        return results
+                self.selected_details = self.repo_details.get(
+                    (repo_type, results[0].repo_id)
+                )
+            else:
+                self.last_repo_id = ""
 
     def sift_results(
         self,
