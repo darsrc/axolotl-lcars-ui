@@ -1,4 +1,4 @@
-lcars-ui @ git+https://github.com/darsrc/LCARS-WebUI.git@main#subdirectory=lcars-ui
+lcars-ui @ git+https://github.com/darsrc/LCARS-WebUI.git@v4.1.0#subdirectory=lcars-ui
 huggingface_hub>=1.0
 psutil>=5.9
 pyyaml>=6.0

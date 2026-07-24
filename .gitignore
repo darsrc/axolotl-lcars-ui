@@ -11,6 +11,7 @@ last_run_prepared/
 *.log
 
 # Local secrets and machine-specific settings
+.lcars-ui-state.json
 .env
 .env.*
 !.env.example

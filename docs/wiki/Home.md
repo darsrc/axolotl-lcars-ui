@@ -2,7 +2,8 @@
 
 Axolotl LCARS UI is a browser-based control surface for configuring, validating, launching, and monitoring [Axolotl](https://docs.axolotl.ai/) workflows.
 
-It is built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
+It is built with the pinned v4.1.0 release of
+[LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 
 ## What It Manages
 
@@ -11,10 +12,15 @@ It is built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 - Preflight validation for common expensive mistakes before a run starts.
 - Axolotl CLI process launch, stop, and log monitoring.
 - CPU, RAM, disk, GPU, top-process, GPU-process, and storage-hotspot telemetry.
-- Hugging Face model and dataset search/download/cache management with clickable result links,
-  local sift/sort filters, VRAM-fit filtering, file compatibility, repo inspection, selected repo
-  ids, and fine-tune lookup.
+- Native v4.1 sortable/filterable/pageable tables with stable selection, rich expansion,
+  linked/copyable cells and inline actions; searchable controls and logs; validated inputs;
+  collapsible panels; richer telemetry; and confirmation prompts for consequential actions.
+- Hugging Face model and dataset search/download/cache management with typed result sorting,
+  stable row selection, lazy rich repository expansion, in-place inspect/copy/queue/config
+  actions, local metadata filters, VRAM-fit filtering, file compatibility, and fine-tune lookup.
 - Ollama model detection with local-source apply or Hugging Face source search.
+- Control selections persist across browser reloads and server restarts via
+  `.lcars-ui-state.json`; structured config values persist in the active YAML file.
 
 ## Main Pages
 
@@ -26,7 +32,8 @@ It is built with [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 - **Tracking**: logging, eval, integrations, RL, TRL, vLLM, and lm-eval settings.
 - **Run**: Axolotl command launcher and live logs.
 - **Resources**: local system telemetry and resource attribution.
-- **HF Hub**: Hugging Face search, inspection, fine-tunes, and filtered downloads.
+- **HF Hub**: selectable repository search, lazy expandable manifests, inline file/config
+  actions, fine-tunes, and filtered downloads.
 - **Content**: downloaded content size and cleanup.
 - **Ollama**: local Ollama detection and compatibility notes.
 

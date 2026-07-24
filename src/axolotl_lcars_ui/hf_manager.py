@@ -12,7 +12,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-from urllib.parse import quote
 
 from huggingface_hub import HfApi, scan_cache_dir, snapshot_download
 from huggingface_hub.constants import HF_HUB_CACHE
@@ -53,6 +52,8 @@ MODEL_SUPPORT_DOWNLOAD_ALLOW = tuple(
     pattern for pattern in MODEL_DOWNLOAD_ALLOW if pattern not in {"*.safetensors", "*.bin", "*.pt"}
 )
 DATASET_SUPPORT_DOWNLOAD_ALLOW = ("*.py", "*.md")
+
+LOCAL_SORT_KEYS = ("downloads", "likes", "updated", "repo", "size", "fit", "files")
 
 
 @dataclass
@@ -119,13 +120,19 @@ class HuggingFaceManager:
         self.all_search_results: list[SearchResult] = []
         self.search_results: list[SearchResult] = []
         self.related_results: list[SearchResult] = []
+        self.related_repo_id = ""
         self.selected_details: RepoDetails | None = None
+        self.repo_details: dict[tuple[RepoType, str], RepoDetails] = {}
+        self.inspection_errors: dict[tuple[RepoType, str], str] = {}
+        self.expanded_result_ids: list[str] = []
         self.jobs: dict[str, DownloadJob] = {}
         self.logs: deque[str] = deque(maxlen=300)
         self.last_repo_id = ""
         self.last_repo_type: RepoType = "model"
         self.last_local_path = ""
         self.vram_limit_gb: float | None = None
+        self.local_sort = "downloads"
+        self.local_sort_desc = True
         self.max_concurrent_downloads = _download_concurrency()
         self._lock = threading.Lock()
 
@@ -163,10 +170,13 @@ class HuggingFaceManager:
             self.all_search_results = results
             self.search_results = results
             self.related_results = []
+            self.related_repo_id = ""
             self.selected_details = None
+            self.expanded_result_ids = []
             if results:
                 self.last_repo_id = results[0].repo_id
                 self.last_repo_type = repo_type
+                self.selected_details = self.repo_details.get((repo_type, results[0].repo_id))
         self.log(f"Search returned {len(results)} {repo_type} result(s).")
         return results
 
@@ -175,6 +185,7 @@ class HuggingFaceManager:
         *,
         text: str = "",
         sort: str = "downloads",
+        descending: bool | None = None,
         artifact_filter: str = "any",
         quant_filter: str = "any",
         fit_filter: str = "any",
@@ -182,6 +193,7 @@ class HuggingFaceManager:
     ) -> list[SearchResult]:
         text = text.strip().lower()
         sort = _normalize_local_sort(sort)
+        descending = default_sort_descending(sort) if descending is None else descending
         artifact_filter = artifact_filter or "any"
         quant_filter = quant_filter or "any"
         fit_filter = fit_filter or "any"
@@ -211,24 +223,45 @@ class HuggingFaceManager:
             if fit_filter == "known size" and result.fit == "unknown":
                 continue
             results.append(result)
-        results.sort(key=_sort_key(sort), reverse=sort not in {"repo", "updated_asc"})
+        results.sort(key=_sort_key(sort), reverse=descending)
+        current_key = (self.last_repo_type, self.last_repo_id)
         with self._lock:
             self.search_results = results
+            self.local_sort = sort
+            self.local_sort_desc = descending
             if results:
-                self.last_repo_id = results[0].repo_id
-                self.last_repo_type = results[0].repo_type
+                selected = next(
+                    (
+                        result
+                        for result in results
+                        if (result.repo_type, result.repo_id) == current_key
+                    ),
+                    results[0],
+                )
+                self.last_repo_id = selected.repo_id
+                self.last_repo_type = selected.repo_type
+                self.selected_details = self.repo_details.get(
+                    (selected.repo_type, selected.repo_id)
+                )
+            valid_ids = {f"{result.repo_type}:{result.repo_id}" for result in results}
+            self.expanded_result_ids = [
+                row_id for row_id in self.expanded_result_ids if row_id in valid_ids
+            ]
         self.log(f"Sifted to {len(results)} result(s).")
         return results
 
-    def sort_current_results(self, sort: str) -> list[SearchResult]:
+    def sort_current_results(self, sort: str, *, descending: bool | None = None) -> list[SearchResult]:
         sort = _normalize_local_sort(sort)
+        descending = default_sort_descending(sort) if descending is None else descending
         with self._lock:
             self.search_results = sorted(
                 self.search_results,
                 key=_sort_key(sort),
-                reverse=sort not in {"repo", "updated_asc"},
+                reverse=descending,
             )
-        self.log(f"Sorted current results by {sort}.")
+            self.local_sort = sort
+            self.local_sort_desc = descending
+        self.log(f"Sorted current results by {sort} ({'desc' if descending else 'asc'}).")
         return self.search_results
 
     def inspect_repo(
@@ -260,7 +293,9 @@ class HuggingFaceManager:
                 )
         except Exception as exc:
             self.log(f"HF inspect failed for {repo_id}: {exc}")
-            return self.selected_details
+            with self._lock:
+                self.inspection_errors[(repo_type, repo_id)] = str(exc)
+            return None
         result = self._result_from_info(info, repo_type)
         files = [_repo_file_from_sibling(item, repo_type) for item in _siblings(info)]
         if files:
@@ -273,20 +308,56 @@ class HuggingFaceManager:
             result = _with_fit(result, self.vram_limit_gb)
         details = RepoDetails(result=result, files=files)
         with self._lock:
+            key = (repo_type, repo_id)
+            self.repo_details[key] = details
+            self.inspection_errors.pop(key, None)
+            self.all_search_results = _replace_result(self.all_search_results, result)
+            self.search_results = _replace_result(self.search_results, result)
+            self.related_results = _replace_result(self.related_results, result)
             self.selected_details = details
             self.last_repo_id = repo_id
             self.last_repo_type = repo_type
         self.log(f"Inspect found {len(files)} file(s) for {repo_id}.")
         return details
 
+    def details_for(self, repo_id: str, repo_type: RepoType) -> RepoDetails | None:
+        with self._lock:
+            return self.repo_details.get((repo_type, repo_id.strip()))
+
+    def inspection_error_for(self, repo_id: str, repo_type: RepoType) -> str:
+        with self._lock:
+            return self.inspection_errors.get((repo_type, repo_id.strip()), "")
+
+    def set_expanded_result_ids(self, row_ids: list[str]) -> None:
+        unique_ids = list(dict.fromkeys(row_id for row_id in row_ids if row_id))
+        with self._lock:
+            self.expanded_result_ids = unique_ids
+
+    def select_repository(
+        self,
+        repo_id: str,
+        repo_type: RepoType,
+    ) -> SearchResult | None:
+        repo_id = repo_id.strip()
+        if not repo_id:
+            return None
+        with self._lock:
+            self.last_repo_id = repo_id
+            self.last_repo_type = repo_type
+            details = self.repo_details.get((repo_type, repo_id))
+            self.selected_details = details
+            if details is not None:
+                return details.result
+            for result in [*self.search_results, *self.related_results]:
+                if result.repo_id == repo_id and result.repo_type == repo_type:
+                    return result
+        return None
+
     def select_result(self, repo_id: str) -> SearchResult | None:
         repo_id = repo_id.strip()
         for result in self.search_results:
             if result.repo_id == repo_id:
-                with self._lock:
-                    self.last_repo_id = result.repo_id
-                    self.last_repo_type = result.repo_type
-                return result
+                return self.select_repository(result.repo_id, result.repo_type)
         return None
 
     def find_related_models(self, repo_id: str, *, limit: int = 12) -> list[SearchResult]:
@@ -329,6 +400,7 @@ class HuggingFaceManager:
                 break
         with self._lock:
             self.related_results = related
+            self.related_repo_id = repo_id
         self.log(f"Fine-tune lookup returned {len(related)} result(s).")
         return related
 
@@ -500,8 +572,9 @@ class HuggingFaceManager:
         self.log(f"Download complete for {job.repo_type} {job.repo_id}: {local_path}")
 
     def _details_for_download(self, repo_id: str, repo_type: RepoType, *, revision: str | None = None) -> RepoDetails:
-        if self.selected_details and self.selected_details.result.repo_id == repo_id and self.selected_details.result.repo_type == repo_type:
-            return self.selected_details
+        cached = self.details_for(repo_id, repo_type)
+        if cached is not None:
+            return cached
         details = self.inspect_repo(repo_id, repo_type, revision=revision)
         if details is None:
             raise ValueError(f"Could not inspect {repo_type} {repo_id} before queueing download.")
@@ -649,6 +722,20 @@ class HuggingFaceManager:
             )
 
 
+def _replace_result(
+    results: list[SearchResult],
+    replacement: SearchResult,
+) -> list[SearchResult]:
+    """Replace matching lightweight search metadata with an inspected result."""
+
+    return [
+        replacement
+        if item.repo_id == replacement.repo_id and item.repo_type == replacement.repo_type
+        else item
+        for item in results
+    ]
+
+
 def search_rows(results: list[SearchResult]) -> list[dict[str, str]]:
     if not results:
         return [{"Repo": "No results yet", "Fit": "", "Weights / Quants": "", "Files": "", "Downloads": "", "Likes": "", "Updated": ""}]
@@ -670,53 +757,6 @@ def result_options(results: list[SearchResult]) -> list[str]:
     if not results:
         return [""]
     return [result.repo_id for result in results]
-
-
-def result_link_markdown(results: list[SearchResult], details: RepoDetails | None = None) -> str:
-    lines = [
-        "| Repo | Fit | Weights / Quants | Files | Downloads | Likes | Updated |",
-        "| --- | --- | --- | ---: | ---: | ---: | --- |",
-    ]
-    if not results:
-        lines.append("| No results loaded |  |  |  |  |  |  |")
-    for index, item in enumerate(results[:20], start=1):
-        size = item.quants or item.weights or item.size or "inspect for sizes"
-        fit = item.fit or "fit unknown"
-        hf_path = _hf_path(item)
-        lines.append(
-            f"| {index}. `{item.repo_id}`<br>`{hf_path}` | {fit} | {size} | "
-            f"{item.file_count or ''} | {'' if item.downloads is None else f'{item.downloads:,}'} | "
-            f"{'' if item.likes is None else f'{item.likes:,}'} | {item.updated} |"
-        )
-        if details and details.result.repo_id == item.repo_id and details.result.repo_type == item.repo_type:
-            lines.extend(_expanded_repo_markdown(details))
-    if details and not any(item.repo_id == details.result.repo_id and item.repo_type == details.result.repo_type for item in results):
-        lines.append("")
-        lines.append(f"**Expanded selection:** `{details.result.repo_id}`")
-        lines.extend(_expanded_repo_markdown(details))
-    return "\n".join(lines)
-
-
-def _expanded_repo_markdown(details: RepoDetails) -> list[str]:
-    result = details.result
-    lines = [
-        "",
-        f"**Expanded:** `{result.repo_id}` - {result.compatibility}",
-        "",
-        "| File / Quant | Size | Kind | Axolotl | Queue |",
-        "| --- | ---: | --- | --- | --- |",
-    ]
-    files = sorted(details.files, key=lambda item: (item.axolotl == "skip", item.kind, item.path.lower()))
-    for item in files[:40]:
-        encoded_repo = quote(result.repo_id, safe="")
-        encoded_file = quote(item.path, safe="")
-        queue = "blocked" if item.axolotl == "skip" else f"[queue](/hf/download-file/{result.repo_type}/{encoded_repo}?file={encoded_file})"
-        lines.append(
-            f"| `{item.path}` | {format_bytes(item.size) if item.size else 'unknown'} | {item.kind} | {item.axolotl} | {queue} |"
-        )
-    if len(files) > 40:
-        lines.append(f"| ... {len(files) - 40} more file(s) |  |  |  | inspect via Selection panel |")
-    return lines
 
 
 def detail_summary_rows(details: RepoDetails | None) -> list[dict[str, str]]:
@@ -782,11 +822,6 @@ def _compact_size_cell(item: SearchResult) -> str:
     return item.quants or item.weights or item.size or item.params or "inspect"
 
 
-def _hf_path(item: SearchResult) -> str:
-    prefix = "datasets/" if item.repo_type == "dataset" else ""
-    return f"huggingface.co/{prefix}{item.repo_id}"
-
-
 def _use_as(item: SearchResult) -> str:
     if item.repo_type == "dataset":
         return "dataset path"
@@ -804,7 +839,15 @@ def _normalize_sort(sort: str) -> str:
 
 def _normalize_local_sort(sort: str) -> str:
     value = (sort or "downloads").strip().lower()
-    return value if value in {"downloads", "likes", "repo", "updated", "updated_asc", "size", "fit"} else "downloads"
+    if value == "updated_asc":
+        return value
+    return value if value in LOCAL_SORT_KEYS else "downloads"
+
+
+def default_sort_descending(sort: str) -> bool:
+    """Natural first-click direction: A-Z for names, largest/newest first otherwise."""
+
+    return sort not in {"repo", "updated_asc"}
 
 
 def _sort_key(sort: str):
@@ -817,6 +860,8 @@ def _sort_key(sort: str):
             return item.updated
         if sort == "size":
             return item.weight_bytes or item.size_bytes
+        if sort == "files":
+            return item.file_count or 0
         if sort == "fit":
             return _fit_sort_value(item)
         return item.downloads or 0

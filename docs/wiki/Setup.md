@@ -50,9 +50,9 @@ The Setup page separates starter choices from raw Axolotl fields:
 
 ## LCARS WebUI
 
-This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs it
-directly from GitHub. For local LCARS WebUI development, install your checkout into the venv in
-editable mode after installing requirements:
+This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs the
+tested v4.1.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
+install your checkout into the venv in editable mode after installing requirements:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
@@ -62,7 +62,20 @@ uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 
 Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading private repos or pushing prepared datasets/models.
 
-The HF Hub page inspects model and dataset repositories before use. Model downloads are filtered to Axolotl-relevant config/tokenizer/support files plus `.safetensors`, `.bin`, and `.pt` weights. Dataset downloads are filtered to JSON, JSONL, Parquet, CSV, Arrow, and text-style files.
+The HF Hub repository table is the center of the workflow:
+
+- Click a row to target the Repository Command panel.
+- Expand a row to inspect its manifest on demand. The expansion shows compatibility, lineage,
+  exact file sizes, related fine-tunes, and inline config/download actions.
+- Repository ids and file paths have explicit copy controls; repository ids also open the
+  corresponding Hugging Face page.
+- Inspection failures stay in the expanded row with a retry action.
+- Enter an `owner/repository` id in Repository Command to inspect a repo outside the current
+  search results.
+
+Model downloads are filtered to Axolotl-relevant config/tokenizer/support files plus
+`.safetensors`, `.bin`, and `.pt` weights. Dataset downloads are filtered to JSON, JSONL,
+Parquet, CSV, Arrow, and text-style files.
 
 ## Tracking Integrations
 
