@@ -2,7 +2,7 @@
 
 Axolotl LCARS UI is a browser-based control surface for configuring, validating, launching, and monitoring [Axolotl](https://docs.axolotl.ai/) workflows.
 
-It is built with the pinned v4.2.0 release of
+It is built with the pinned v4.3.0 release of
 [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 
 ## What It Manages
@@ -12,11 +12,12 @@ It is built with the pinned v4.2.0 release of
 - Preflight validation for common expensive mistakes before a run starts.
 - Axolotl CLI process launch, stop, and log monitoring.
 - CPU, RAM, disk, GPU, top-process, GPU-process, and storage-hotspot telemetry.
-- Native v4.2 viewport-aware mosaic layouts with operator arrangement controls, stable panel
-  grouping and sizing, dense-page filler control, sortable/filterable/pageable tables with
-  stable selection, rich expansion, linked/copyable cells and inline actions; searchable
-  controls and logs; typed defaults, validated preferences, and atomic form submissions;
-  collapsible panels; richer telemetry; and confirmation prompts for consequential actions.
+- Native v4.3 content-sized, viewport-aware mosaic layouts with edge-aware operator arrangement,
+  editable rows, columns and sections, stable panel grouping, dense-page filler control, and
+  sortable/filterable/pageable tables with stable selection, rich expansion, linked/copyable
+  cells and inline actions; searchable controls and logs; typed defaults, validated preferences,
+  and atomic form submissions; collapsible panels; richer telemetry; and confirmation prompts
+  for consequential actions.
 - Hugging Face model and dataset search/download/cache management with typed result sorting,
   stable row selection, automatic visible-page metadata hydration, rich repository expansion,
   in-place inspect/copy/queue/config actions, local metadata filters, model VRAM fit, dataset
@@ -35,10 +36,10 @@ It is built with the pinned v4.2.0 release of
 - **Tracking**: logging, eval, integrations, RL, TRL, vLLM, and lm-eval settings.
 - **Run**: Axolotl command launcher and live logs.
 - **Resources**: local system telemetry and resource attribution.
-- **HF Hub**: arrangeable search, sift, result, target, workflow, transfer, and activity panels
-  with independent search/target types, lazy expandable manifests, inline file/config actions,
-  fine-tunes, and filtered downloads.
-- **Content**: downloaded content size and cleanup.
+- **HF Hub**: content-aware repository browser, unified search/exact-repository query, advanced
+  result filters, and selected-repository actions with independent search/target types, lazy
+  expandable manifests, inline file/config actions, fine-tunes, and filtered downloads.
+- **Content**: transfer queue, Hub activity, downloaded content size, and cache cleanup.
 - **Ollama**: local Ollama detection and compatibility notes.
 
 ## Related Pages

@@ -103,6 +103,7 @@ CONFIG_GROUP_NOTES = {
 
 SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
 HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
+HF_QUERY_MODE_OPTIONS = ["Search Hub", "Inspect Exact Repository"]
 HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
 HF_ARTIFACT_FILTER_OPTIONS = ["any artifact", "base/trainable models", "PEFT adapters", "datasets", "runtime only"]
 HF_QUANT_FILTER_OPTIONS = [
@@ -294,6 +295,7 @@ def _persisted_widget_defaults() -> dict[str, Any]:
         "run-cli-args": "",
         "run-launcher-args": "",
         "hf-query": "llama instruct",
+        "hf-query-mode": HF_QUERY_MODE_OPTIONS[0],
         "hf-search-repo-type": STATE.hf.last_repo_type,
         "hf-repo-type": STATE.hf.last_repo_type,
         "hf-sort": HF_SORT_OPTIONS[0],
@@ -320,6 +322,7 @@ def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
         "setup-dataset-preset": tuple(DATASET_PRESETS),
         "run-action": tuple(AXOLOTL_ACTIONS),
         "run-launcher": ("", "python", "accelerate", "torchrun"),
+        "hf-query-mode": tuple(HF_QUERY_MODE_OPTIONS),
         "hf-search-repo-type": ("model", "dataset"),
         "hf-repo-type": ("model", "dataset"),
         "hf-sort": tuple(HF_SORT_OPTIONS),
@@ -1073,8 +1076,7 @@ def _hub_page() -> None:
             "Repository Browser",
             color="lilac",
             id="hf-results-panel",
-            span=(4, 5),
-            weight=12,
+            weight=8,
             aspect="wide",
             group="hf-discovery",
             options=COLLAPSIBLE_PANEL_OPTIONS,
@@ -1088,31 +1090,36 @@ def _hub_page() -> None:
             )
 
         with lcars.control_panel(
-            "Hub Search",
+            "Hub Query",
             color="lilac",
             id="hf-search-panel",
-            span=(2, 6),
             weight=8,
-            aspect="flex",
+            aspect="wide",
             group="hf-discovery",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             with lcars.form(
                 "",
                 action_id="hf-search",
-                submit_label="Run Search",
+                submit_label="Run Query",
                 id="hf-search-form",
                 color="anakiwa",
-                options=lcars.FormOptions(layout="grid", columns=2),
+                options=lcars.FormOptions(layout="row"),
             ):
                 _seed_text("hf-query", "llama instruct")
                 query = lcars.text_input(
-                    "Search",
+                    "Query / Repository ID",
                     value="llama instruct",
-                    placeholder="model or dataset query",
+                    placeholder="keywords or owner/repository",
                     autocomplete=False,
                     id="hf-query",
                     options=SEARCH_INPUT_OPTIONS,
+                )
+                query_mode = lcars.select(
+                    "Mode",
+                    HF_QUERY_MODE_OPTIONS,
+                    value=HF_QUERY_MODE_OPTIONS[0],
+                    id="hf-query-mode",
                 )
                 search_repo_type = lcars.select(
                     "Repo Type",
@@ -1120,94 +1127,129 @@ def _hub_page() -> None:
                     value=STATE.hf.last_repo_type,
                     id="hf-search-repo-type",
                 )
-                sort = lcars.select("HF Sort", HF_SORT_OPTIONS, value="downloads", id="hf-sort")
+                _seed_text("hf-revision", "")
+                revision = lcars.text_input(
+                    "Revision [optional]",
+                    placeholder="branch/tag/commit",
+                    autocomplete=False,
+                    id="hf-revision",
+                    options=COMMAND_INPUT_OPTIONS,
+                )
+            if _is_active_action("hf-search") or _is_active_action("hf-query"):
+                if query_mode == HF_QUERY_MODE_OPTIONS[1]:
+                    _hf_inspect_action(query, search_repo_type, revision)
+                else:
+                    _hf_search_action(
+                        query,
+                        search_repo_type,
+                        sort=_widget_value("hf-sort", HF_SORT_OPTIONS[0]),
+                        compatibility=_widget_value(
+                            "hf-compatibility",
+                            HF_COMPATIBILITY_OPTIONS[0],
+                        ),
+                        limit=_widget_value("hf-limit", HF_LIMIT_OPTIONS[0]),
+                        sift=_widget_value("hf-sift", ""),
+                        local_sort=STATE.hf.local_sort,
+                        artifact_filter=_widget_value(
+                            "hf-artifact-filter",
+                            HF_ARTIFACT_FILTER_OPTIONS[0],
+                        ),
+                        quant_filter=_widget_value(
+                            "hf-quant-filter",
+                            HF_QUANT_FILTER_OPTIONS[0],
+                        ),
+                        fit_filter=_widget_value(
+                            "hf-fit-filter",
+                            HF_FIT_FILTER_OPTIONS[0],
+                        ),
+                        vram_limit=_widget_value(
+                            "hf-vram-limit",
+                            str(STATE.hf.vram_limit_gb or 24),
+                        ),
+                    )
+
+        with lcars.control_panel(
+            "Result Filters",
+            color="blue-bell",
+            id="hf-filter-panel",
+            weight=5,
+            aspect="wide",
+            group="hf-discovery",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            with lcars.form(
+                "",
+                action_id="hf-filter-results",
+                submit_label="Apply / Refresh Results",
+                id="hf-filter-form",
+                color="blue-bell",
+                options=lcars.FormOptions(layout="grid", columns=2),
+            ):
+                sort = lcars.select(
+                    "Hub Sort",
+                    HF_SORT_OPTIONS,
+                    value=HF_SORT_OPTIONS[0],
+                    id="hf-sort",
+                )
                 compatibility = lcars.select(
-                    "Browse Filter",
+                    "Compatibility",
                     HF_COMPATIBILITY_OPTIONS,
                     value=HF_COMPATIBILITY_OPTIONS[0],
                     id="hf-compatibility",
                 )
-                limit = lcars.select("Limit", HF_LIMIT_OPTIONS, value=HF_LIMIT_OPTIONS[0], id="hf-limit")
-            # The sift controls are rendered below, so their live values are read from
-            # session state instead of the (not yet assigned) widget returns.
-            if _is_active_action("hf-search") or _is_active_action("hf-query"):
+                limit = lcars.select(
+                    "Result Limit",
+                    HF_LIMIT_OPTIONS,
+                    value=HF_LIMIT_OPTIONS[0],
+                    id="hf-limit",
+                )
+                _seed_text("hf-sift", "")
+                sift = lcars.text_input(
+                    "Metadata Contains",
+                    placeholder="repo, tag, quant, family",
+                    autocomplete=False,
+                    id="hf-sift",
+                    options=SEARCH_INPUT_OPTIONS,
+                )
+                artifact_filter = lcars.select(
+                    "Artifact",
+                    HF_ARTIFACT_FILTER_OPTIONS,
+                    value=HF_ARTIFACT_FILTER_OPTIONS[0],
+                    id="hf-artifact-filter",
+                )
+                quant_filter = lcars.select(
+                    "Weight Format",
+                    HF_QUANT_FILTER_OPTIONS,
+                    value=HF_QUANT_FILTER_OPTIONS[0],
+                    id="hf-quant-filter",
+                )
+                vram_limit = lcars.number_input(
+                    "Model VRAM Budget",
+                    value=float(STATE.hf.vram_limit_gb or 24),
+                    min=1,
+                    max=256,
+                    step=1,
+                    id="hf-vram-limit",
+                    options=lcars.NumberInputOptions(
+                        precision=0,
+                        suffix=" GB",
+                        required=True,
+                    ),
+                )
+                fit_filter = lcars.select(
+                    "Model VRAM Fit",
+                    HF_FIT_FILTER_OPTIONS,
+                    value="any",
+                    id="hf-fit-filter",
+                )
+            if _is_active_action("hf-filter-results"):
+                _set_widget_value("hf-query-mode", HF_QUERY_MODE_OPTIONS[0])
                 _hf_search_action(
-                    query,
-                    search_repo_type,
+                    _widget_value("hf-query", "llama instruct"),
+                    _widget_value("hf-search-repo-type", STATE.hf.last_repo_type),
                     sort=sort,
                     compatibility=compatibility,
                     limit=limit,
-                    sift=_widget_value("hf-sift", ""),
-                    local_sort=STATE.hf.local_sort,
-                    artifact_filter=_widget_value("hf-artifact-filter", HF_ARTIFACT_FILTER_OPTIONS[0]),
-                    quant_filter=_widget_value("hf-quant-filter", HF_QUANT_FILTER_OPTIONS[0]),
-                    fit_filter=_widget_value("hf-fit-filter", HF_FIT_FILTER_OPTIONS[0]),
-                    vram_limit=_widget_value(
-                        "hf-vram-limit",
-                        str(STATE.hf.vram_limit_gb or 24),
-                    ),
-                )
-
-        with lcars.control_panel(
-            "Result Sift",
-            color="blue-bell",
-            id="hf-filter-panel",
-            span=(2, 6),
-            weight=5,
-            aspect="flex",
-            group="hf-discovery",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
-        ):
-            _seed_text("hf-sift", "")
-            sift = lcars.text_input(
-                "Metadata Contains",
-                placeholder="repo, tag, quant, family",
-                autocomplete=False,
-                id="hf-sift",
-                options=SEARCH_INPUT_OPTIONS,
-            )
-            artifact_filter = lcars.select(
-                "Artifact",
-                HF_ARTIFACT_FILTER_OPTIONS,
-                value=HF_ARTIFACT_FILTER_OPTIONS[0],
-                id="hf-artifact-filter",
-            )
-            quant_filter = lcars.select(
-                "Weight Format",
-                HF_QUANT_FILTER_OPTIONS,
-                value=HF_QUANT_FILTER_OPTIONS[0],
-                id="hf-quant-filter",
-            )
-            vram_limit = lcars.number_input(
-                "Model VRAM Budget",
-                value=float(STATE.hf.vram_limit_gb or 24),
-                min=1,
-                max=256,
-                step=1,
-                id="hf-vram-limit",
-                options=lcars.NumberInputOptions(
-                    precision=0,
-                    suffix=" GB",
-                    required=True,
-                ),
-            )
-            fit_filter = lcars.select(
-                "Model VRAM Fit",
-                HF_FIT_FILTER_OPTIONS,
-                value="any",
-                id="hf-fit-filter",
-            )
-            if lcars.button("Apply Sift", color="blue-bell", id="hf-apply-sift"):
-                _hf_sift_action(
-                    sift=sift,
-                    local_sort=STATE.hf.local_sort,
-                    artifact_filter=artifact_filter,
-                    quant_filter=quant_filter,
-                    fit_filter=fit_filter,
-                    vram_limit=vram_limit,
-                )
-            if _is_active_action("hf-sift"):
-                _hf_sift_action(
                     sift=sift,
                     local_sort=STATE.hf.local_sort,
                     artifact_filter=artifact_filter,
@@ -1216,72 +1258,32 @@ def _hub_page() -> None:
                     vram_limit=vram_limit,
                 )
 
+        repo_id = _widget_value("hf-repo-id", STATE.hf.last_repo_id).strip()
+        target_repo_type = _widget_value(
+            "hf-repo-type",
+            STATE.hf.last_repo_type,
+        )
+        selected_result = _hf_result_for(repo_id)
+        selected_blocked = bool(selected_result is not None and selected_result.blocked)
+
         with lcars.control_panel(
-            "Repository Target",
-            color="anakiwa",
-            id="hf-target-panel",
-            span=(2, 4),
+            "Selected Repository Actions",
+            color="tanoi",
+            id="hf-workflow-panel",
             weight=7,
-            aspect="tall",
+            aspect="wide",
             group="hf-selection",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             lcars.text(
-                STATE.hf.last_repo_id.strip() or "No repository selected.",
+                repo_id or "No repository selected.",
                 size="mono",
                 id="hf-selected-repo-copy",
-                options=_hf_selected_text_options(STATE.hf.last_repo_id, STATE.hf.last_repo_type),
-            )
-            target_repo_type = lcars.select(
-                "Repository Type",
-                ["model", "dataset"],
-                value=STATE.hf.last_repo_type,
-                id="hf-repo-type",
-            )
-            _seed_text("hf-repo-id", STATE.hf.last_repo_id, force=True)
-            repo_id = lcars.text_input(
-                "Repository ID",
-                value=STATE.hf.last_repo_id,
-                placeholder="owner/name",
-                autocomplete=False,
-                id="hf-repo-id",
-                options=lcars.TextInputOptions(
-                    commit="enter",
-                    validation=lcars.ValidationOptions(
-                        required=True,
-                        pattern=r"^[^/\s]+/[^/\s]+$",
-                        message="Use a Hugging Face owner/repository id.",
-                    ),
+                options=_hf_selected_text_options(
+                    repo_id,
+                    target_repo_type,
                 ),
             )
-            _seed_text("hf-revision", "")
-            revision = lcars.text_input(
-                "Revision [optional]",
-                placeholder="branch/tag/commit",
-                autocomplete=False,
-                id="hf-revision",
-                options=COMMAND_INPUT_OPTIONS,
-            )
-            selected_result = _hf_result_for(repo_id)
-            selected_blocked = bool(selected_result is not None and selected_result.blocked)
-            if lcars.button(
-                "Inspect / Refresh",
-                color="anakiwa",
-                id="hf-inspect",
-                disabled=not bool(repo_id.strip()),
-            ) or _is_active_action("hf-repo-id"):
-                _hf_inspect_action(repo_id, target_repo_type, revision)
-
-        with lcars.control_panel(
-            "Repository Workflow",
-            color="tanoi",
-            id="hf-workflow-panel",
-            span=(2, 5),
-            weight=4,
-            aspect="tall",
-            group="hf-selection",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
-        ):
             if lcars.button(
                 "Find Fine-Tunes",
                 color="lilac",
@@ -1308,22 +1310,18 @@ def _hub_page() -> None:
                 disabled=not bool(repo_id.strip()) or selected_blocked,
             ):
                 _hf_use_repo_action(repo_id, target_repo_type)
-            if lcars.button(
-                "Use Last Local Snapshot",
-                color="blue-bell",
-                id="hf-use-local",
-                disabled=not bool(STATE.hf.last_local_path),
-            ):
-                _hf_use_last_local_action(target_repo_type)
 
+
+def _content_page() -> None:
+    rows, total_text, total_bytes = STATE.hf.cache_rows()
+    with lcars.page("Content", id="content", layout="grid", fillers=False):
         with lcars.data_panel(
             "Transfer Queue",
             color="golden-tanoi",
             id="hf-transfers-panel",
-            span=(4, 3),
             weight=10,
             aspect="wide",
-            group="hf-transfers",
+            group="content-transfers",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             _enhanced_table(
@@ -1341,7 +1339,7 @@ def _hub_page() -> None:
             id="hf-activity-panel",
             weight=7,
             aspect="tall",
-            group="hf-transfers",
+            group="content-transfers",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             lcars.log(
@@ -1352,10 +1350,6 @@ def _hub_page() -> None:
                 options=LOG_VIEW_OPTIONS,
             )
 
-
-def _content_page() -> None:
-    rows, total_text, total_bytes = STATE.hf.cache_rows()
-    with lcars.page("Content", id="content", layout="grid", fillers=False):
         with lcars.data_panel(
             "Downloaded Content",
             color="blue-bell",
@@ -1420,6 +1414,13 @@ def _content_page() -> None:
             if lcars.button("Refresh Cache", color="anakiwa", id="cache-refresh"):
                 _update_cache_widgets()
                 lcars.notify("HF cache refreshed.")
+            if lcars.button(
+                "Use Last Snapshot In Config",
+                color="blue-bell",
+                id="hf-use-local",
+                disabled=not bool(STATE.hf.last_local_path),
+            ):
+                _hf_use_last_local_action(STATE.hf.last_repo_type)
             if lcars.button(
                 "Delete Cached Repo",
                 color="red",
@@ -2090,8 +2091,8 @@ def _handle_hf_table_action() -> None:
             if selected is not None:
                 repo_type, repo_id = selected
                 STATE.hf.select_repository(repo_id, repo_type)  # type: ignore[arg-type]
-                _set_widget_value("hf-repo-id", repo_id)
-                _set_widget_value("hf-repo-type", repo_type)
+                _set_session_value("hf-repo-id", repo_id)
+                _set_session_value("hf-repo-type", repo_type)
                 _update_hf_widgets()
             return
 
@@ -2116,8 +2117,8 @@ def _handle_hf_table_action() -> None:
             if inspect_candidates:
                 _, repo_type, repo_id = inspect_candidates[0]
                 STATE.hf.select_repository(repo_id, repo_type)  # type: ignore[arg-type]
-                _set_widget_value("hf-repo-id", repo_id)
-                _set_widget_value("hf-repo-type", repo_type)
+                _set_session_value("hf-repo-id", repo_id)
+                _set_session_value("hf-repo-type", repo_type)
                 _hf_inspect_action(repo_id, repo_type, "")
             else:
                 _update_hf_widgets()
@@ -2608,34 +2609,8 @@ def _hf_search_action(
         fit_filter=fit_filter,
         vram_limit_gb=vram,
     )
-    _set_widget_value("hf-repo-type", repo_type)
-    if results:
-        _set_widget_value("hf-repo-id", STATE.hf.last_repo_id)
-    _update_hf_widgets()
-    _append_hf_logs()
-
-
-def _hf_sift_action(
-    *,
-    sift: str,
-    local_sort: str,
-    artifact_filter: str,
-    quant_filter: str,
-    fit_filter: str,
-    vram_limit: float | int | str,
-) -> None:
-    results = STATE.hf.sift_results(
-        text=sift,
-        sort=local_sort,
-        descending=_kept_sort_direction(local_sort),
-        artifact_filter=artifact_filter,
-        quant_filter=quant_filter,
-        fit_filter=fit_filter,
-        vram_limit_gb=_optional_float(vram_limit),
-    )
-    if results:
-        _set_widget_value("hf-repo-id", STATE.hf.last_repo_id)
-        _set_widget_value("hf-repo-type", STATE.hf.last_repo_type)
+    _set_session_value("hf-repo-type", repo_type)
+    _set_session_value("hf-repo-id", STATE.hf.last_repo_id)
     _update_hf_widgets()
     _append_hf_logs()
 
@@ -2649,16 +2624,16 @@ def _hf_inspect_action(repo_id: str, repo_type: str, revision: str = "") -> None
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
     STATE.hf.select_repository(repo_id, repo_type)  # type: ignore[arg-type]
-    _set_widget_value("hf-repo-id", repo_id)
-    _set_widget_value("hf-repo-type", repo_type)
+    _set_session_value("hf-repo-id", repo_id)
+    _set_session_value("hf-repo-type", repo_type)
     details = STATE.hf.inspect_repo(  # type: ignore[arg-type]
         repo_id,
         repo_type,
         revision=revision.strip() or None,
     )
     if details is not None:
-        _set_widget_value("hf-repo-id", details.result.repo_id)
-        _set_widget_value("hf-repo-type", details.result.repo_type)
+        _set_session_value("hf-repo-id", details.result.repo_id)
+        _set_session_value("hf-repo-type", details.result.repo_type)
         STATE.hf.set_expanded_result_ids(
             [
                 *STATE.hf.expanded_result_ids,
@@ -2800,8 +2775,8 @@ def _ollama_search_hf_action(model_name: str) -> None:
     _set_widget_value("hf-query", query)
     _set_widget_value("hf-search-repo-type", "model")
     if results:
-        _set_widget_value("hf-repo-id", STATE.hf.last_repo_id)
-        _set_widget_value("hf-repo-type", STATE.hf.last_repo_type)
+        _set_session_value("hf-repo-id", STATE.hf.last_repo_id)
+        _set_session_value("hf-repo-type", STATE.hf.last_repo_type)
     lcars.notify(f"HF model search loaded for Ollama source: {query}.")
     _append_hf_logs()
 
@@ -2940,9 +2915,6 @@ def _update_hf_widgets() -> None:
             copy_columns={"Repo", "Revision", "Local Path"},
         ),
     )
-    lcars.update("hf-repo-id", value=STATE.hf.last_repo_id)
-    lcars.update("hf-repo-type", value=STATE.hf.last_repo_type)
-    lcars.update("hf-inspect", disabled=not bool(repo_id))
     lcars.update(
         "hf-related",
         disabled=not bool(repo_id) or STATE.hf.last_repo_type != "model",
@@ -3373,7 +3345,7 @@ def _enhanced_table(
     copy_columns: set[str] | None = None,
     page_size: int | None = None,
 ) -> None:
-    """Render a compact v4.2 table with native data controls and copy affordances."""
+    """Render a compact v4.3 table with native data controls and copy affordances."""
 
     filter_columns = filter_columns or set()
     numeric_columns = numeric_columns or set()
@@ -3464,10 +3436,15 @@ def _serialized_table_value(value: Any, *, numeric: bool, copyable: bool) -> Any
 
 
 def _set_widget_value(widget_id: str, value: str) -> None:
-    ctx = get_ctx()
-    store = get_session_state(ctx.session_id)
-    store[widget_id] = value
+    _set_session_value(widget_id, value)
     lcars.update(widget_id, value=value)
+
+
+def _set_session_value(widget_id: str, value: str) -> None:
+    """Store non-rendered workflow state without emitting a dead widget update."""
+
+    store = get_session_state(get_ctx().session_id)
+    store[widget_id] = value
 
 
 def _bounded_int(value: str, *, default: int, minimum: int, maximum: int) -> int:

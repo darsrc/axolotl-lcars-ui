@@ -51,7 +51,7 @@ The Setup page separates starter choices from raw Axolotl fields:
 ## LCARS WebUI
 
 This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs the
-tested v4.2.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
+tested v4.3.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
 install your checkout into the venv in editable mode after installing requirements:
 
 ```bash
@@ -62,13 +62,18 @@ uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 
 Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading private repos or pushing prepared datasets/models.
 
-The HF Hub is an arrangeable mosaic workspace. Use the rail's **Arrange** control to move or resize
-its search, sift, results, repository target, workflow, transfer, and activity panels. The
-repository table remains the center of the workflow:
+The HF Hub is a content-sized discovery workspace. Its repository browser, unified Hub query,
+advanced result filters, and selected-repository actions form one workflow; the
+transfer queue and activity log now live with cache operations on the **Content** page. Use the
+rail's **Arrange** control to move or resize panels. Edge drops place a panel beside or
+above/below another; **+ Row**, **+ Column**, and **+ Section** create explicit workflow bands.
+The repository table remains the center of the workflow:
 
-- Click a row to target the Repository Target panel.
-- Search submits its query, repo type, sort, compatibility, and limit atomically, so a quick
-  click cannot execute stale control values. Model VRAM budget lives with the local sift controls.
+- Click a row to target Selected Repository Actions.
+- Hub Query submits its mode, query/repository id, repo type, and optional revision atomically.
+  **Search Hub** discovers repositories; **Inspect Exact Repository** opens an `owner/repository`
+  outside the current results. Result Filters atomically refreshes Hub sort, compatibility,
+  result limit, metadata/artifact/weight filters, and model VRAM fit.
 - Search repo type and selected repository type are independent, so switching a search between
   models and datasets cannot silently retarget actions for an already selected repository.
 - The visible page is inspected automatically to populate model VRAM fit or dataset size,
@@ -78,8 +83,8 @@ repository table remains the center of the workflow:
 - Repository ids and file paths have explicit copy controls; repository ids also open the
   corresponding Hugging Face page.
 - Inspection failures stay in the expanded row with a retry action.
-- Enter an `owner/repository` id in Repository Target to inspect a repo outside the current
-  search results.
+- Queue and activity details remain visible on **Content** while downloads run; the last
+  completed local snapshot can also be applied to the active config there.
 
 Model downloads are filtered to Axolotl-relevant config/tokenizer/support files plus
 `.safetensors`, `.bin`, and `.pt` weights. Dataset downloads are filtered to JSON, JSONL,

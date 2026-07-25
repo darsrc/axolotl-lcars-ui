@@ -48,36 +48,54 @@ def _manifest_widgets(manifest: object) -> dict[str, object]:
     return widgets
 
 
-class V42UiTests(unittest.TestCase):
+class V43UiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest = main._build_manifest(main.build_ui, get_ctx().config)
         cls.widgets = _manifest_widgets(cls.manifest)
 
-    def test_project_builds_with_lcars_v42(self) -> None:
-        self.assertEqual(lcars.__version__, "4.2.0")
+    def test_project_builds_with_lcars_v43(self) -> None:
+        self.assertEqual(lcars.__version__, "4.3.0")
         self.assertEqual(len(self.manifest.pages), 12)
 
-    def test_manifest_uses_v42_capabilities(self) -> None:
+    def test_manifest_uses_v43_capabilities(self) -> None:
         hub = self.manifest.pages["hub"]
         self.assertEqual(hub.archetype, "grid")
         self.assertFalse(hub.fillers)
         results_panel = self.widgets["hf-results-panel"]
-        self.assertEqual(results_panel.weight, 12)
+        self.assertEqual(results_panel.weight, 8)
         self.assertEqual(results_panel.aspect, "wide")
         self.assertEqual(results_panel.group, "hf-discovery")
-        self.assertEqual(results_panel.span, (4, 5))
+        self.assertIsNone(results_panel.span)
         self.assertEqual(self.widgets["hf-search-panel"].group, "hf-discovery")
-        self.assertEqual(self.widgets["hf-search-panel"].span, (2, 6))
+        self.assertEqual(self.widgets["hf-search-panel"].aspect, "wide")
+        self.assertIsNone(self.widgets["hf-search-panel"].span)
         self.assertEqual(self.widgets["hf-filter-panel"].group, "hf-discovery")
-        self.assertEqual(self.widgets["hf-filter-panel"].span, (2, 6))
-        self.assertEqual(self.widgets["hf-target-panel"].group, "hf-selection")
-        self.assertEqual(self.widgets["hf-target-panel"].span, (2, 4))
+        self.assertFalse(self.widgets["hf-filter-panel"].options.initial_collapsed)
+        self.assertIsNone(self.widgets["hf-filter-panel"].span)
         self.assertEqual(self.widgets["hf-workflow-panel"].group, "hf-selection")
-        self.assertEqual(self.widgets["hf-workflow-panel"].span, (2, 5))
-        self.assertEqual(self.widgets["hf-transfers-panel"].group, "hf-transfers")
-        self.assertEqual(self.widgets["hf-transfers-panel"].span, (4, 3))
-        self.assertEqual(self.widgets["hf-activity-panel"].group, "hf-transfers")
+        self.assertIsNone(self.widgets["hf-workflow-panel"].span)
+        self.assertEqual(self.widgets["hf-transfers-panel"].group, "content-transfers")
+        self.assertIsNone(self.widgets["hf-transfers-panel"].span)
+        self.assertEqual(self.widgets["hf-activity-panel"].group, "content-transfers")
+        self.assertIsNone(self.widgets["hf-activity-panel"].span)
+        hub_panel_ids = {
+            widget.id
+            for row in self.manifest.pages["hub"].rows
+            for column in row.columns
+            for widget in column.widgets
+        }
+        content_panel_ids = {
+            widget.id
+            for row in self.manifest.pages["content"].rows
+            for column in row.columns
+            for widget in column.widgets
+        }
+        self.assertNotIn("hf-transfers-panel", hub_panel_ids)
+        self.assertNotIn("hf-activity-panel", hub_panel_ids)
+        self.assertNotIn("hf-target-panel", hub_panel_ids)
+        self.assertIn("hf-transfers-panel", content_panel_ids)
+        self.assertIn("hf-activity-panel", content_panel_ids)
 
         results = self.widgets["hf-results-table"]
         self.assertTrue(results.options.expandable)
@@ -100,15 +118,30 @@ class V42UiTests(unittest.TestCase):
             {child.id for child in search_form.children},
             {
                 "hf-query",
+                "hf-query-mode",
                 "hf-search-repo-type",
+                "hf-revision",
+            },
+        )
+        filter_form = self.widgets["hf-filter-form"]
+        self.assertEqual(filter_form.type, "form")
+        self.assertEqual(filter_form.action_id, "hf-filter-results")
+        self.assertEqual(
+            {child.id for child in filter_form.children},
+            {
                 "hf-sort",
                 "hf-compatibility",
                 "hf-limit",
+                "hf-sift",
+                "hf-artifact-filter",
+                "hf-quant-filter",
+                "hf-vram-limit",
+                "hf-fit-filter",
             },
         )
-        self.assertNotEqual(
-            self.widgets["hf-search-repo-type"].id,
-            self.widgets["hf-repo-type"].id,
+        self.assertEqual(
+            self.widgets["hf-query-mode"].value,
+            main.HF_QUERY_MODE_OPTIONS[0],
         )
         self.assertEqual(
             self.widgets["run-cli-args"].options.commit,
@@ -295,19 +328,25 @@ class V42UiTests(unittest.TestCase):
             clear_session_state(session_id)
             set_ctx(original_ctx)
 
-    def test_hf_search_form_submits_visible_values_atomically(self) -> None:
+    def test_hf_search_form_submits_core_values_with_saved_filters(self) -> None:
         original_ctx = get_ctx()
         original_vram = main.STATE.hf.vram_limit_gb
         session_id = "hf-atomic-form"
         payload = {
             "hf-query": "atomic dataset query",
+            "hf-query-mode": main.HF_QUERY_MODE_OPTIONS[0],
             "hf-search-repo-type": "dataset",
-            "hf-sort": "likes",
-            "hf-compatibility": "include warnings and blocked",
-            "hf-limit": "25",
+            "hf-revision": "",
         }
         try:
             clear_session_state(session_id)
+            get_session_state(session_id).update(
+                {
+                    "hf-sort": "likes",
+                    "hf-compatibility": "include warnings and blocked",
+                    "hf-limit": "25",
+                }
+            )
             with (
                 patch.object(main.STATE.hf, "search", return_value=[]) as search,
                 patch.object(main.STATE.hf, "hydrate_results", return_value=0),
@@ -336,6 +375,87 @@ class V42UiTests(unittest.TestCase):
             self.assertEqual(get_session_state(session_id)["hf-repo-type"], "dataset")
         finally:
             main.STATE.hf.vram_limit_gb = original_vram
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_filter_form_refreshes_search_with_atomic_filter_values(self) -> None:
+        original_ctx = get_ctx()
+        original_vram = main.STATE.hf.vram_limit_gb
+        session_id = "hf-atomic-filters"
+        payload = {
+            "hf-sort": "likes",
+            "hf-compatibility": "include warnings and blocked",
+            "hf-limit": "25",
+            "hf-sift": "safetensors",
+            "hf-artifact-filter": "base/trainable models",
+            "hf-quant-filter": "Transformers safetensors",
+            "hf-vram-limit": 16,
+            "hf-fit-filter": "fits vram",
+        }
+        try:
+            clear_session_state(session_id)
+            get_session_state(session_id).update(
+                {
+                    "hf-query": "atomic model query",
+                    "hf-search-repo-type": "model",
+                }
+            )
+            with (
+                patch.object(main.STATE.hf, "search", return_value=[]) as search,
+                patch.object(main.STATE.hf, "hydrate_results", return_value=0),
+                patch.object(main.STATE.hf, "sift_results", return_value=[]) as sift,
+                patch.object(main, "_persist_widget_state"),
+            ):
+                app = main.create_lcars_app(main.build_ui)
+                handler = app.state.plugin_action_handlers["*"]
+                asyncio.run(handler("hf-filter-results", payload, session_id))
+
+            search.assert_called_once_with(
+                "atomic model query",
+                "model",
+                sort="likes",
+                compatible_only=False,
+                limit=25,
+            )
+            sift.assert_called_once_with(
+                text="safetensors",
+                sort=main.STATE.hf.local_sort,
+                descending=main._kept_sort_direction(main.STATE.hf.local_sort),
+                artifact_filter="base/trainable models",
+                quant_filter="Transformers safetensors",
+                fit_filter="fits vram",
+                vram_limit_gb=16.0,
+            )
+        finally:
+            main.STATE.hf.vram_limit_gb = original_vram
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_query_form_inspects_atomic_exact_repository_values(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "hf-atomic-exact-lookup"
+        payload = {
+            "hf-query": "example/direct-dataset",
+            "hf-query-mode": main.HF_QUERY_MODE_OPTIONS[1],
+            "hf-search-repo-type": "dataset",
+            "hf-revision": "refs/pr/12",
+        }
+        try:
+            clear_session_state(session_id)
+            with (
+                patch.object(main, "_hf_inspect_action") as inspect,
+                patch.object(main, "_persist_widget_state"),
+            ):
+                app = main.create_lcars_app(main.build_ui)
+                handler = app.state.plugin_action_handlers["*"]
+                asyncio.run(handler("hf-search", payload, session_id))
+
+            inspect.assert_called_once_with(
+                "example/direct-dataset",
+                "dataset",
+                "refs/pr/12",
+            )
+        finally:
             clear_session_state(session_id)
             set_ctx(original_ctx)
 
@@ -632,6 +752,7 @@ class V42UiTests(unittest.TestCase):
                 get_session_state(session_id)["hf-search-repo-type"],
                 "dataset",
             )
+            self.assertEqual(get_session_state(session_id)["hf-repo-id"], "")
         finally:
             clear_session_state(session_id)
             set_ctx(original_ctx)
