@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from axolotl_lcars_ui.hf_manager import HuggingFaceManager, SearchResult
 
 
-class HuggingFaceManagerV43Tests(unittest.TestCase):
+class HuggingFaceManagerV44Tests(unittest.TestCase):
     def test_visible_result_hydration_populates_metadata_without_changing_selection(self) -> None:
         manager = HuggingFaceManager()
         manager.vram_limit_gb = 24

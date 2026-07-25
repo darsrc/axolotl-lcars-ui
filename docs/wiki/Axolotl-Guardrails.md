@@ -39,9 +39,9 @@ The validator checks for:
 - DeepSpeed and FSDP being enabled together.
 - checkpoint and resume combinations that may prevent clean recovery.
 
-## Runner Commands
+## Workflow and Runner Commands
 
-The run page supports Axolotl config commands:
+The Workflow page exposes these config commands as typed, connectable stages:
 
 - `preprocess`
 - `train`
@@ -58,3 +58,9 @@ It also supports utility actions:
 - `delinearize-llama4`
 
 Launcher arguments for `python`, `accelerate`, or `torchrun` are separated from Axolotl command arguments and passed after `--`.
+
+Workflow launch always reruns preflight first. A workflow must contain exactly one Active Config
+source and one continuous, unbranched chain of action stages. Stages run sequentially through the
+single-process runner; a failure or cancellation prevents later stages from starting. Utility
+actions remain available through the **Console** page's **Single Action Override** because they do
+not consume the active config like workflow stages do.

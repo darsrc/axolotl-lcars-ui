@@ -51,12 +51,29 @@ The Setup page separates starter choices from raw Axolotl fields:
 ## LCARS WebUI
 
 This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs the
-tested v4.3.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
+tested v4.4.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
 install your checkout into the venv in editable mode after installing requirements:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 ```
+
+## Workflow Page
+
+The Workflow page uses LCARS WebUI's typed node canvas as an executable Axolotl lifecycle:
+
+- The starter graph runs `preprocess → train → evaluate` from the active config.
+- Add other supported Axolotl stages from the searchable palette, then connect them into one
+  continuous chain from **Active Config**.
+- Launcher mode, Axolotl arguments, and launcher arguments live on the stage that uses them.
+- **Validate Workflow** checks the graph and the active config without launching a process.
+- **Start Workflow** runs connected stages sequentially after confirmation and preflight.
+- The graph is locked during execution; queued nodes are cancelled if a stage fails or the
+  operator cancels the plan.
+- Graph layout and values persist in `.lcars-ui-state.json`. Native JSON import/export provides a
+  portable copy; imported graphs are normalized to this app's trusted Axolotl node templates.
+- The **Console** page's **Single Action Override** retains the direct command launcher for utility
+  or ad-hoc work while keeping the immersive graph page focused.
 
 ## Hugging Face
 

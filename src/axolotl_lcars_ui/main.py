@@ -36,6 +36,7 @@ from axolotl_lcars_ui.resources import (
 from axolotl_lcars_ui.runner import AXOLOTL_ACTIONS, CONFIG_ACTIONS, LAUNCHER_ACTIONS, AxolotlRunner
 from axolotl_lcars_ui.ui_state import PERSISTED_WIDGET_IDS, UiStateStore
 from axolotl_lcars_ui.validator import AxolotlPreflight, PreflightIssue, issue_rows
+from axolotl_lcars_ui.workflow import WorkflowError, WorkflowManager
 
 from lcars_ui.app import create_app
 from lcars_ui.dsl._builder import _ManifestBuilder
@@ -46,6 +47,7 @@ from lcars_ui.dsl.api import _index_form_children
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_AXOLOTL = "axolotl-run-log"
 LOG_HF = "hf-log"
+WORKFLOW_CANVAS_ID = "axolotl-workflow-canvas"
 HF_RESULTS_TABLE_ID = "hf-results-table"
 HF_RESULTS_PAGE_SIZE = 10
 SEARCH_INPUT_OPTIONS = lcars.TextInputOptions(
@@ -237,6 +239,7 @@ class AppState:
     hf: HuggingFaceManager
     ollama: OllamaManager
     runner: AxolotlRunner
+    workflow: WorkflowManager
     preflight: AxolotlPreflight
     preflight_issues: list[PreflightIssue] = field(default_factory=list)
     resource_tick: int = 0
@@ -264,12 +267,14 @@ class AppState:
         return self.preflight_issues
 
 
+CONFIG_STORE = ConfigStore(PROJECT_ROOT)
 STATE = AppState(
-    config_store=ConfigStore(PROJECT_ROOT),
+    config_store=CONFIG_STORE,
     telemetry=TelemetrySampler(),
     hf=HuggingFaceManager(),
     ollama=OllamaManager(),
     runner=AxolotlRunner(PROJECT_ROOT),
+    workflow=WorkflowManager(CONFIG_STORE.active_name),
     preflight=AxolotlPreflight(PROJECT_ROOT, OllamaManager()),
 )
 STATE.preflight = AxolotlPreflight(PROJECT_ROOT, STATE.ollama)
@@ -415,6 +420,19 @@ def _restore_persisted_state() -> None:
     if isinstance(vram, (int, float)) and vram > 0:
         STATE.hf.vram_limit_gb = float(vram)
 
+    saved_workflow = UI_STATE.get("workflow_document")
+    try:
+        STATE.workflow = WorkflowManager(
+            STATE.config_store.active_name,
+            saved_workflow if isinstance(saved_workflow, dict) else None,
+        )
+    except Exception:
+        STATE.workflow = WorkflowManager(STATE.config_store.active_name)
+        UI_STATE.set(
+            "workflow_document",
+            STATE.workflow.document.model_dump(mode="json"),
+        )
+
 
 _restore_persisted_state()
 STATE.telemetry.sample()
@@ -442,7 +460,8 @@ def build_ui() -> None:
     lcars.nav("Hardware", page="config-hardware", color="anakiwa")
     lcars.nav("Tracking", page="config-tracking", color="lilac")
     lcars.nav("Advanced", page="config-advanced", color="blue-bell")
-    lcars.nav("Run", page="run", color="red")
+    lcars.nav("Workflow", page="run", color="red")
+    lcars.nav("Console", page="console", color="hopbush")
     lcars.nav("Resources", page="resources", color="anakiwa")
     lcars.nav("HF Hub", page="hub", color="lilac")
     lcars.nav("Content", page="content", color="blue-bell")
@@ -456,6 +475,7 @@ def build_ui() -> None:
     _config_tracking_page()
     _config_advanced_page()
     _run_page()
+    _console_page()
     _resources_page()
     _hub_page()
     _content_page()
@@ -526,11 +546,11 @@ def _command_page() -> None:
             if lcars.button("Save Structured Config", color="tanoi", id="save-structured-config"):
                 _save_config_action()
             if lcars.button(
-                "Start Training",
+                "Start Single Training",
                 color="red",
                 id="quick-start-training",
                 options=lcars.ButtonOptions(
-                    confirm="Start Axolotl training with the active config?",
+                    confirm="Start one Axolotl training action with the active config?",
                     debounce_ms=750,
                     busy_label="Starting",
                 ),
@@ -785,18 +805,135 @@ def _config_advanced_page() -> None:
 
 
 def _run_page() -> None:
-    with lcars.page("Run", id="run", layout="grid", fillers=False):
+    STATE.workflow.sync_active_config(STATE.config_store.active_name)
+    with lcars.page("Workflow", id="run", layout="telemetry", fillers=False):
         with lcars.data_panel(
-            "Process State",
+            "Axolotl Workflow",
             color="red",
-            id="run-process-panel",
+            id="workflow-graph-panel",
+            zone="primary",
             weight=12,
             aspect="wide",
-            group="run-console",
+            group="workflow-execution",
+        ):
+            workflow_state = lcars.node_canvas(
+                STATE.workflow.document,
+                title="Training Lifecycle",
+                execution=STATE.workflow.execution_state(),
+                color="red",
+                id=WORKFLOW_CANVAS_ID,
+                options=_workflow_canvas_options(),
+            )
+        if _is_active_action(WORKFLOW_CANVAS_ID) and workflow_state is not None:
+            _workflow_graph_action(workflow_state)
+
+        with lcars.control_panel(
+            "Mission Control",
+            color="golden-tanoi",
+            id="workflow-control-panel",
+            zone="side",
+            weight=7,
+            aspect="tall",
+            group="workflow-execution",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            workflow_status = STATE.workflow.status.upper()
+            lcars.metric(
+                "Workflow",
+                workflow_status,
+                status=_workflow_status_severity(),
+                color="red",
+                id="workflow-status",
+                options=lcars.MetricOptions(
+                    secondary_value=STATE.config_store.active_name,
+                ),
+            )
+            lcars.text(
+                STATE.workflow.current_label,
+                size="mono",
+                color="anakiwa",
+                id="workflow-current-stage",
+                options=lcars.TextOptions(wrap="wrap"),
+            )
+            lcars.progress(
+                "Workflow Completion",
+                STATE.workflow.progress_percent,
+                color="tanoi",
+                id="workflow-progress",
+                options=lcars.MeterOptions(
+                    unit="%",
+                    segments=12,
+                    ticks=True,
+                    warn_threshold=101,
+                    crit_threshold=101,
+                ),
+            )
+            lcars.text(
+                STATE.workflow.message,
+                size="mono",
+                color="pale-canary",
+                id="workflow-message",
+                options=lcars.TextOptions(wrap="wrap"),
+            )
+            if lcars.button(
+                "Start Workflow",
+                color="red",
+                id="workflow-start",
+                disabled=STATE.workflow.is_active or STATE.runner.is_running(),
+                options=lcars.ButtonOptions(
+                    confirm=(
+                        "Run every connected Axolotl stage in order with the active config?"
+                    ),
+                    debounce_ms=750,
+                    busy_label="Launching",
+                ),
+            ):
+                _start_workflow_action()
+            if lcars.button(
+                "Cancel Workflow",
+                color="red",
+                id="workflow-cancel",
+                disabled=not STATE.workflow.is_active,
+                options=lcars.ButtonOptions(
+                    confirm="Stop the active process and cancel every queued workflow stage?",
+                    debounce_ms=750,
+                    busy_label="Cancelling",
+                ),
+            ):
+                _cancel_workflow_action()
+            if lcars.button(
+                "Validate Workflow",
+                color="anakiwa",
+                id="workflow-validate",
+                disabled=STATE.workflow.is_active,
+            ):
+                _validate_workflow_action()
+            if lcars.button(
+                "Reset Workflow",
+                color="lilac",
+                id="workflow-reset",
+                disabled=STATE.workflow.is_active,
+                options=lcars.ButtonOptions(
+                    confirm="Replace this graph with the starter preprocess → train → evaluate plan?",
+                ),
+            ):
+                _reset_workflow_action()
+
+
+def _console_page() -> None:
+    with lcars.page("Console", id="console", layout="console", fillers=False):
+        with lcars.data_panel(
+            "Process Output",
+            color="red",
+            id="run-process-panel",
+            zone="primary",
+            weight=12,
+            aspect="wide",
+            group="process-console",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             lcars.metric(
-                "Status",
+                "Process",
                 STATE.runner.status_label(),
                 status=STATE.runner.status_severity(),
                 color="red",
@@ -807,7 +944,7 @@ def _run_page() -> None:
             )
             command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
             lcars.text(
-                command[:260],
+                command[:500],
                 size="mono",
                 id="run-command-text",
                 options=lcars.TextOptions(copyable=True, wrap="pre"),
@@ -821,12 +958,13 @@ def _run_page() -> None:
             )
 
         with lcars.control_panel(
-            "Launch Controls",
-            color="golden-tanoi",
+            "Single Action Override",
+            color="blue-bell",
             id="run-controls-panel",
+            zone="dock",
             weight=7,
-            aspect="tall",
-            group="run-console",
+            aspect="wide",
+            group="process-console",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             action = lcars.select(
@@ -864,11 +1002,12 @@ def _run_page() -> None:
                 options=COMMAND_INPUT_OPTIONS,
             )
             if lcars.button(
-                "Start",
+                "Start Single Action",
                 color="red",
                 id="run-start",
+                disabled=STATE.workflow.is_active or STATE.runner.is_running(),
                 options=lcars.ButtonOptions(
-                    confirm="Launch this Axolotl action?",
+                    confirm="Launch only this Axolotl action outside the workflow?",
                     debounce_ms=750,
                     busy_label="Launching",
                 ),
@@ -880,9 +1019,10 @@ def _run_page() -> None:
                     launcher_args=launcher_args,
                 )
             if lcars.button(
-                "Stop",
+                "Stop Process",
                 color="red",
                 id="run-stop",
+                disabled=not STATE.runner.is_running(),
                 options=lcars.ButtonOptions(
                     confirm="Stop the active Axolotl process?",
                     debounce_ms=750,
@@ -892,44 +1032,6 @@ def _run_page() -> None:
                 _stop_axolotl_action()
             if lcars.button("Preflight", color="anakiwa", id="run-preflight-local"):
                 _run_preflight_action()
-
-        with lcars.data_panel(
-            "Live Hardware",
-            color="anakiwa",
-            id="run-hardware-panel",
-            weight=9,
-            aspect="wide",
-            group="run-hardware",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
-        ):
-            snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
-            lcars.metric(
-                "CPU",
-                f"{snapshot.cpu_percent:.0f}%",
-                status=_percent_status(snapshot.cpu_percent),
-                color="anakiwa",
-                id="system-cpu",
-                options=lcars.MetricOptions(
-                    trend="up" if snapshot.cpu_percent >= 80 else "flat",
-                ),
-            )
-            lcars.metric(
-                "RAM",
-                f"{snapshot.ram_percent:.0f}%",
-                status=_percent_status(snapshot.ram_percent),
-                color="blue-bell",
-                id="system-ram",
-                options=lcars.MetricOptions(
-                    secondary_value=format_bytes(snapshot.ram_used),
-                    trend="up" if snapshot.ram_percent >= 80 else "flat",
-                ),
-            )
-            _enhanced_table(
-                gpu_rows(snapshot.gpus),
-                title="GPU",
-                id="run-gpu-table",
-                filter_columns={"GPU", "Name"},
-            )
 
 
 def _resources_page() -> None:
@@ -2414,6 +2516,8 @@ def _config_page_actions(suffix: str) -> None:
 
 
 def _switch_config_action(selected: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         STATE.config_store.set_active(selected)
         lcars.notify(f"Active config switched to {selected}.")
@@ -2424,6 +2528,8 @@ def _switch_config_action(selected: str) -> None:
 
 
 def _create_config_action(new_name: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         created = STATE.config_store.create_named(new_name.strip())
         lcars.notify(f"Created config {created}.")
@@ -2460,6 +2566,8 @@ def _page_for_group(group: str) -> str:
 
 
 def _save_config_action(values: dict[str, Any] | None = None) -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         payload = values if values is not None else _collect_editor_values()
         STATE.config_store.save_editor_values(payload)
@@ -2471,6 +2579,8 @@ def _save_config_action(values: dict[str, Any] | None = None) -> None:
 
 
 def _duplicate_config_action() -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         new_name = STATE.config_store.create_copy("copy-of-" + STATE.config_store.active_name)
         lcars.notify(f"Created config {new_name}.")
@@ -2491,6 +2601,185 @@ def _run_preflight_action() -> None:
         lcars.notify(f"Preflight passed with {warnings} warning(s).")
 
 
+def _workflow_canvas_options() -> lcars.NodeCanvasOptions:
+    return lcars.NodeCanvasOptions(
+        editable=not STATE.workflow.is_active,
+        interaction=lcars.InteractionOptions(
+            mode="server",
+            action_id=WORKFLOW_CANVAS_ID,
+        ),
+        min_zoom=0.35,
+        max_zoom=1.8,
+        snap_to_grid=True,
+        grid_size=16,
+        minimap=False,
+        allow_import_export=True,
+        history_limit=75,
+        show_palette=True,
+        show_run=False,
+        show_queue=False,
+        show_cancel=False,
+    )
+
+
+def _workflow_status_severity() -> str:
+    if STATE.workflow.status == "error":
+        return "crit"
+    if STATE.workflow.status in {"queued", "cancelled"}:
+        return "warn"
+    return "ok"
+
+
+def _workflow_blocks_config_change() -> bool:
+    if not STATE.workflow.is_active:
+        return False
+    lcars.notify(
+        "The active config is locked until the workflow completes or is cancelled.",
+        level="error",
+    )
+    return True
+
+
+def _persist_workflow_document() -> None:
+    changed = UI_STATE.set(
+        "workflow_document",
+        STATE.workflow.document.model_dump(mode="json"),
+    )
+    if changed:
+        UI_STATE.save()
+
+
+def _workflow_graph_action(state: lcars.NodeCanvasState) -> None:
+    try:
+        STATE.workflow.replace_document(
+            state.document,
+            STATE.config_store.active_name,
+        )
+        _persist_workflow_document()
+        if state.last_event == "import":
+            lcars.notify("Workflow graph imported and normalized to Axolotl stages.")
+        _update_workflow_widgets()
+    except Exception as exc:
+        lcars.notify(f"Workflow edit rejected: {exc}", level="error")
+        _update_workflow_widgets(include_document=True)
+
+
+def _validate_workflow_action() -> None:
+    try:
+        plan = STATE.workflow.plan()
+        issues = STATE.refresh_preflight()
+        _update_preflight_widgets(issues)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        sequence = " → ".join(step.label for step in plan)
+        STATE.workflow.status = "idle"
+        STATE.workflow.message = f"Valid plan: {sequence}."
+        STATE.workflow.node_execution = {}
+        if errors:
+            lcars.notify(
+                f"Workflow graph is valid, but preflight blocks launch: {errors[0].detail}",
+                level="error",
+            )
+        else:
+            lcars.notify(f"Workflow valid: {sequence}.")
+        _update_workflow_widgets()
+    except Exception as exc:
+        STATE.workflow.status = "error"
+        STATE.workflow.message = str(exc)
+        lcars.notify(f"Workflow invalid: {exc}", level="error")
+        _update_workflow_widgets()
+
+
+def _start_workflow_action() -> None:
+    try:
+        issues = STATE.refresh_preflight()
+        _update_preflight_widgets(issues)
+        errors = [issue for issue in issues if issue.severity == "error"]
+        if errors:
+            raise WorkflowError(f"Preflight blocked launch: {errors[0].detail}")
+        plan = STATE.workflow.plan()
+        STATE.workflow.start(STATE.runner, STATE.config_store.active_path)
+        lcars.notify(
+            f"Workflow started: {' → '.join(step.label for step in plan)}."
+        )
+        _update_workflow_widgets()
+        lcars.update(
+            "run-status",
+            value=STATE.runner.status_label(),
+            status=STATE.runner.status_severity(),
+        )
+        lcars.update(
+            "run-command-text",
+            content=" ".join(STATE.runner.state.command),
+        )
+    except Exception as exc:
+        lcars.notify(f"Unable to start workflow: {exc}", level="error")
+        _update_workflow_widgets()
+
+
+def _cancel_workflow_action() -> None:
+    try:
+        STATE.workflow.cancel(STATE.runner)
+        lcars.notify("Workflow cancelled.")
+        _update_workflow_widgets()
+        lcars.update(
+            "run-status",
+            value=STATE.runner.status_label(),
+            status=STATE.runner.status_severity(),
+        )
+    except Exception as exc:
+        lcars.notify(f"Unable to cancel workflow: {exc}", level="error")
+
+
+def _reset_workflow_action() -> None:
+    try:
+        STATE.workflow.reset(STATE.config_store.active_name)
+        _persist_workflow_document()
+        lcars.notify("Starter workflow restored.")
+        _update_workflow_widgets(include_document=True)
+    except Exception as exc:
+        lcars.notify(f"Unable to reset workflow: {exc}", level="error")
+
+
+def _update_workflow_widgets(*, include_document: bool = False) -> None:
+    canvas_payload: dict[str, Any] = {
+        "execution": STATE.workflow.execution_state().model_dump(mode="json"),
+        "options": _workflow_canvas_options().model_dump(mode="json"),
+    }
+    if include_document:
+        canvas_payload["document"] = STATE.workflow.document.model_dump(mode="json")
+    lcars.update(WORKFLOW_CANVAS_ID, **canvas_payload)
+    severity = _workflow_status_severity()
+    lcars.update(
+        "workflow-status",
+        value=STATE.workflow.status.upper(),
+        status=severity,
+    )
+    lcars.update(
+        "workflow-current-stage",
+        content=STATE.workflow.current_label,
+    )
+    lcars.update("workflow-progress", value=STATE.workflow.progress_percent)
+    lcars.update("workflow-message", content=STATE.workflow.message)
+    lcars.update(
+        "workflow-start",
+        disabled=STATE.workflow.is_active or STATE.runner.is_running(),
+    )
+    lcars.update("workflow-cancel", disabled=not STATE.workflow.is_active)
+    lcars.update(
+        "workflow-validate",
+        disabled=STATE.workflow.is_active,
+    )
+    lcars.update(
+        "workflow-reset",
+        disabled=STATE.workflow.is_active,
+    )
+    lcars.update(
+        "run-start",
+        disabled=STATE.workflow.is_active or STATE.runner.is_running(),
+    )
+    lcars.update("run-stop", disabled=not STATE.runner.is_running())
+
+
 def _start_axolotl_action(
     action: str,
     *,
@@ -2499,6 +2788,12 @@ def _start_axolotl_action(
     launcher_args: str = "",
 ) -> None:
     try:
+        if STATE.workflow.is_active:
+            lcars.notify(
+                "A workflow is active. Cancel it before launching a single action.",
+                level="error",
+            )
+            return
         if launcher and action not in LAUNCHER_ACTIONS:
             lcars.notify(f"{action} does not accept launcher mode. Clear Launcher and retry.", level="error")
             return
@@ -2522,17 +2817,24 @@ def _start_axolotl_action(
         lcars.notify("Axolotl process started.")
         lcars.update("run-status", value=STATE.runner.status_label(), status="ok")
         lcars.update("run-command-text", content=" ".join(STATE.runner.state.command))
+        _update_workflow_widgets()
     except Exception as exc:
         lcars.notify(f"Unable to start Axolotl: {exc}", level="error")
 
 
 def _stop_axolotl_action() -> None:
+    if STATE.workflow.is_active:
+        _cancel_workflow_action()
+        return
     STATE.runner.stop()
     lcars.notify("Axolotl stop requested.")
     lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
+    _update_workflow_widgets()
 
 
 def _setup_apply_recipe_action(recipe: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     updates = SETUP_RECIPES.get(recipe)
     if not updates:
         lcars.notify("Unknown setup recipe.", level="error")
@@ -2547,6 +2849,8 @@ def _setup_apply_recipe_action(recipe: str) -> None:
 
 
 def _setup_apply_model_action(model: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         STATE.config_store.apply_model(model)
         lcars.notify(f"Applied model preset: {model}.")
@@ -2557,6 +2861,8 @@ def _setup_apply_model_action(model: str) -> None:
 
 
 def _setup_apply_dataset_action(dataset: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     preset = DATASET_PRESETS.get(dataset)
     if preset is None:
         lcars.notify("Unknown dataset preset.", level="error")
@@ -2694,6 +3000,8 @@ def _hf_download_action(repo_id: str, repo_type: str, revision: str) -> None:
 
 
 def _hf_use_repo_action(repo_id: str, repo_type: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     try:
         if repo_type == "model":
             result = _hf_result_for(repo_id)
@@ -2719,6 +3027,8 @@ def _hf_use_repo_action(repo_id: str, repo_type: str) -> None:
 
 
 def _hf_use_last_local_action(repo_type: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     path = STATE.hf.last_local_path
     if not path:
         lcars.notify("No completed local HF snapshot is available yet.", level="error")
@@ -2782,6 +3092,8 @@ def _ollama_search_hf_action(model_name: str) -> None:
 
 
 def _ollama_use_source_action(model_name: str) -> None:
+    if _workflow_blocks_config_change():
+        return
     model = STATE.ollama.select(model_name.strip())
     if model is None:
         lcars.notify("Ollama model was not found. Refresh and enter the exact name:tag.", level="error")
@@ -2798,8 +3110,7 @@ def _ollama_use_source_action(model_name: str) -> None:
 def live_tick() -> None:
     snapshot = STATE.telemetry.sample()
     STATE.resource_tick += 1
-    lcars.update("system-cpu", value=f"{snapshot.cpu_percent:.0f}%", status=_percent_status(snapshot.cpu_percent))
-    lcars.update("system-ram", value=f"{snapshot.ram_percent:.0f}%", status=_percent_status(snapshot.ram_percent))
+    STATE.workflow.tick(STATE.runner)
     lcars.update("cpu-gauge", value=snapshot.cpu_percent)
     lcars.update("ram-gauge", value=snapshot.ram_percent)
     lcars.update(
@@ -2808,7 +3119,6 @@ def live_tick() -> None:
         status=_percent_status(snapshot.ram_percent),
     )
     lcars.update("gpu-table", **_table_payload(gpu_rows(snapshot.gpus)))
-    lcars.update("run-gpu-table", **_table_payload(gpu_rows(snapshot.gpus)))
     lcars.update("process-table", **_table_payload(process_rows()))
     lcars.update("gpu-process-table", **_table_payload(gpu_process_rows()))
     lcars.update(
@@ -2828,6 +3138,9 @@ def live_tick() -> None:
         )
     lcars.update("resource-chart", series=_series_payload(STATE.telemetry.chart_payload()))
     lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
+    command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
+    lcars.update("run-command-text", content=command[:500])
+    _update_workflow_widgets()
     _append_runner_logs()
     _append_hf_logs()
     _update_cache_widgets(live=True)
@@ -2854,6 +3167,12 @@ def _update_preflight_widgets(issues: list[PreflightIssue]) -> None:
 
 
 def _update_config_widgets() -> None:
+    if STATE.workflow.sync_active_config(STATE.config_store.active_name):
+        _persist_workflow_document()
+        lcars.update(
+            WORKFLOW_CANVAS_ID,
+            document=STATE.workflow.document.model_dump(mode="json"),
+        )
     summary = STATE.config_store.summary_rows()
     payload = _table_payload(summary, copy_columns={"Key", "Value"})
     lcars.update("config-summary-table", **payload)
@@ -3108,6 +3427,10 @@ def _install_raw_editor(app: FastAPI) -> None:
     @app.post("/raw", response_class=HTMLResponse, include_in_schema=False)
     def raw_post(content: str = Form(...)) -> str:
         status = ""
+        if STATE.workflow.is_active:
+            return _raw_html(
+                status="Not saved: the active config is locked while its workflow is running."
+            )
         try:
             STATE.config_store.save_raw_text(content)
             STATE.refresh_preflight()
@@ -3345,7 +3668,7 @@ def _enhanced_table(
     copy_columns: set[str] | None = None,
     page_size: int | None = None,
 ) -> None:
-    """Render a compact v4.3 table with native data controls and copy affordances."""
+    """Render a compact native table with data controls and copy affordances."""
 
     filter_columns = filter_columns or set()
     numeric_columns = numeric_columns or set()

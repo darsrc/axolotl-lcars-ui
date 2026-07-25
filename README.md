@@ -29,7 +29,7 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` installs the tested LCARS WebUI v4.3.0 release tag directly from
+`requirements.txt` installs the tested LCARS WebUI v4.4.0 release tag directly from
 [darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). The tag is pinned so a future
 upstream `main` change cannot silently break this app. For local `lcars-ui` development, install
 your own checkout into the venv in editable mode after installing requirements:
@@ -68,16 +68,20 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   checkpoint/resume hazards, hub auth, and tracking integrations.
 - Axolotl subprocess start/stop and live log viewer for preprocess, train, inference, merge,
   evaluate, lm-eval, and quantize commands.
+- Editable, typed Axolotl workflow canvas with a stage palette, connection validation,
+  import/export, undo/redo, persisted layouts, preflight-gated sequential execution,
+  node-level live status, and safe cancellation. The one-off command launcher remains available
+  as a manual override on the focused Console page.
 - Separate Axolotl action args and launcher args. Launcher args are placed after `--`, matching
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
-- LCARS WebUI v4.3 content-sized, viewport-aware mosaic layouts with edge-aware operator
+- LCARS WebUI v4.4 content-sized, viewport-aware mosaic layouts with edge-aware operator
   arrangement, editable rows, columns and sections, stable panel grouping, dense-page filler
-  control, and native sortable, filterable,
-  pageable data tables with stable selection, rich expandable details, linked/copyable cells,
-  and inline actions; searchable selectors and logs; typed defaults, validated persisted
-  preferences, and atomic multi-control submissions; collapsible panels; enhanced meters and
-  charts; and confirmation prompts for process, download, and cache actions.
+  control, native sortable/filterable/pageable data tables, and an immersive typed node-graph
+  editor with groups, comments, reroutes, a searchable palette, and JSON interchange. Tables keep
+  stable selection, rich expandable details, linked/copyable cells, and inline actions; controls
+  and logs are searchable; defaults and persisted preferences are validated and typed; and
+  consequential process, download, and cache actions require confirmation.
 - Hugging Face model/dataset search in a content-aware four-panel discovery workspace with
   a unified atomic search/exact-repository query, atomic filters, and independent search and
   repository-target types; typed numeric/date sorting; local metadata filters; model
@@ -86,9 +90,9 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   inspect/copy/queue/config actions; fine-tune lookup; and filtered `snapshot_download` downloads
   into the standard HF cache. Transfer monitoring now lives beside cache operations on the
   Content page.
-- Control selections (search query, filters, sort, run action and args, active config, Ollama
-  model) persist to `.lcars-ui-state.json` and are restored after a browser reload or a server
-  restart. Structured config values persist in the active YAML file itself.
+- The workflow graph and control selections (search query, filters, sort, run action and args,
+  active config, Ollama model) persist to `.lcars-ui-state.json` and are restored after a browser
+  reload or server restart. Structured config values persist in the active YAML file itself.
 - Hugging Face cache table, size accounting, and cached repo deletion.
 - Ollama local model detection that can apply real local Transformers directories or launch a
   compatible Hugging Face source search for runtime-only Ollama/GGUF models.

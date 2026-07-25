@@ -48,17 +48,43 @@ def _manifest_widgets(manifest: object) -> dict[str, object]:
     return widgets
 
 
-class V43UiTests(unittest.TestCase):
+class V44UiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest = main._build_manifest(main.build_ui, get_ctx().config)
         cls.widgets = _manifest_widgets(cls.manifest)
 
-    def test_project_builds_with_lcars_v43(self) -> None:
-        self.assertEqual(lcars.__version__, "4.3.0")
-        self.assertEqual(len(self.manifest.pages), 12)
+    def test_project_builds_with_lcars_v44(self) -> None:
+        self.assertEqual(lcars.__version__, "4.4.0")
+        self.assertEqual(len(self.manifest.pages), 13)
 
-    def test_manifest_uses_v43_capabilities(self) -> None:
+    def test_manifest_uses_v44_capabilities(self) -> None:
+        run = self.manifest.pages["run"]
+        self.assertEqual(run.archetype, "telemetry")
+        self.assertFalse(run.fillers)
+        workflow = self.widgets[main.WORKFLOW_CANVAS_ID]
+        self.assertEqual(workflow.type, "node_canvas")
+        self.assertEqual(workflow.document.format, "lcars-node-graph")
+        self.assertEqual(
+            [node.template for node in workflow.document.nodes],
+            ["active-config", "preprocess", "train", "evaluate"],
+        )
+        self.assertTrue(workflow.options.editable)
+        self.assertTrue(workflow.options.snap_to_grid)
+        self.assertFalse(workflow.options.minimap)
+        self.assertTrue(workflow.options.allow_import_export)
+        self.assertEqual(
+            workflow.options.interaction.action_id,
+            main.WORKFLOW_CANVAS_ID,
+        )
+        self.assertEqual(workflow.execution.status, "idle")
+        self.assertEqual(self.widgets["workflow-graph-panel"].zone, "primary")
+        self.assertEqual(self.widgets["workflow-control-panel"].zone, "side")
+        self.assertEqual(self.manifest.pages["console"].archetype, "console")
+        self.assertEqual(self.widgets["run-process-panel"].zone, "primary")
+        self.assertEqual(self.widgets["run-controls-panel"].zone, "dock")
+        self.assertNotIn("run-hardware-panel", self.widgets)
+
         hub = self.manifest.pages["hub"]
         self.assertEqual(hub.archetype, "grid")
         self.assertFalse(hub.fillers)
@@ -161,6 +187,76 @@ class V43UiTests(unittest.TestCase):
 
         cache_delete = self.widgets["cache-delete"]
         self.assertIn("Permanently remove", cache_delete.options.confirm)
+
+    def test_workflow_canvas_commits_transactional_graph_edits(self) -> None:
+        original_ctx = get_ctx()
+        original_workflow = main.STATE.workflow
+        session_id = "workflow-graph-edit"
+        main.STATE.workflow = main.WorkflowManager(
+            main.STATE.config_store.active_name,
+            original_workflow.document.model_dump(mode="json"),
+        )
+        edited_nodes = [
+            node.model_copy(update={"position": (640.0, 160.0)})
+            if node.template == "train"
+            else node
+            for node in main.STATE.workflow.document.nodes
+        ]
+        edited = main.STATE.workflow.document.model_copy(update={"nodes": edited_nodes})
+        try:
+            clear_session_state(session_id)
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id=main.WORKFLOW_CANVAS_ID,
+                    active_action_value={
+                        "kind": "move",
+                        "state": {
+                            "document": edited.model_dump(mode="json"),
+                            "selection": ["train-2"],
+                        },
+                    },
+                )
+            )
+            with (
+                patch.object(main, "_persist_workflow_document") as persist,
+                patch.object(main, "_update_workflow_widgets") as update,
+            ):
+                main._run_page()
+
+            train = next(
+                node
+                for node in main.STATE.workflow.document.nodes
+                if node.template == "train"
+            )
+            self.assertEqual(train.position, (640.0, 160.0))
+            persist.assert_called_once_with()
+            update.assert_called_once_with()
+        finally:
+            main.STATE.workflow = original_workflow
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_active_workflow_locks_config_mutations(self) -> None:
+        original_workflow = main.STATE.workflow
+        main.STATE.workflow = main.WorkflowManager(
+            main.STATE.config_store.active_name,
+            original_workflow.document.model_dump(mode="json"),
+        )
+        main.STATE.workflow.status = "running"
+        try:
+            with (
+                patch.object(main.STATE.config_store, "set_active") as set_active,
+                patch.object(main.lcars, "notify") as notify,
+            ):
+                main._switch_config_action("other.yml")
+
+            set_active.assert_not_called()
+            notify.assert_called_once()
+            self.assertIn("locked", notify.call_args.args[0])
+        finally:
+            main.STATE.workflow = original_workflow
 
     def test_config_controls_keep_defaults_and_runtime_types(self) -> None:
         cfg = main.STATE.config_store.load()
