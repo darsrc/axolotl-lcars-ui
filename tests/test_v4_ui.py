@@ -85,22 +85,36 @@ class V44UiTests(unittest.TestCase):
         self.assertEqual(self.widgets["run-controls-panel"].zone, "dock")
         self.assertNotIn("run-hardware-panel", self.widgets)
 
+        resources = self.manifest.pages["resources"]
+        self.assertEqual(resources.archetype, "console")
+        self.assertFalse(resources.fillers)
+        self.assertEqual(self.widgets["resource-trend-panel"].zone, "primary")
+        self.assertEqual(self.widgets["resource-load-panel"].zone, "side")
+        self.assertEqual(self.widgets["resource-load-panel"].span, (2, 2))
+        self.assertEqual(self.widgets["resource-gpu-panel"].span, (2, 3))
+        self.assertEqual(self.widgets["resource-gpu-process-panel"].span, (2, 3))
+        self.assertEqual(self.widgets["resource-storage-pressure-panel"].span, (2, 3))
+        self.assertFalse(self.widgets["resource-trend-panel"].options.collapsible)
+        self.assertFalse(self.widgets["resource-load-panel"].options.collapsible)
+
         hub = self.manifest.pages["hub"]
-        self.assertEqual(hub.archetype, "grid")
+        self.assertEqual(hub.archetype, "telemetry")
         self.assertFalse(hub.fillers)
         results_panel = self.widgets["hf-results-panel"]
-        self.assertEqual(results_panel.weight, 8)
+        self.assertEqual(results_panel.zone, "primary")
+        self.assertEqual(results_panel.weight, 12)
         self.assertEqual(results_panel.aspect, "wide")
-        self.assertEqual(results_panel.group, "hf-discovery")
+        self.assertEqual(results_panel.group, "hf-browser")
         self.assertIsNone(results_panel.span)
-        self.assertEqual(self.widgets["hf-search-panel"].group, "hf-discovery")
-        self.assertEqual(self.widgets["hf-search-panel"].aspect, "wide")
-        self.assertIsNone(self.widgets["hf-search-panel"].span)
-        self.assertEqual(self.widgets["hf-filter-panel"].group, "hf-discovery")
-        self.assertFalse(self.widgets["hf-filter-panel"].options.initial_collapsed)
-        self.assertIsNone(self.widgets["hf-filter-panel"].span)
-        self.assertEqual(self.widgets["hf-workflow-panel"].group, "hf-selection")
-        self.assertIsNone(self.widgets["hf-workflow-panel"].span)
+        self.assertFalse(results_panel.options.collapsible)
+        operations_panel = self.widgets["hf-operations-panel"]
+        self.assertEqual(operations_panel.zone, "primary")
+        self.assertEqual(operations_panel.aspect, "wide")
+        self.assertEqual(operations_panel.group, "hf-browser")
+        self.assertFalse(operations_panel.options.collapsible)
+        self.assertNotIn("hf-search-panel", self.widgets)
+        self.assertNotIn("hf-filter-panel", self.widgets)
+        self.assertNotIn("hf-workflow-panel", self.widgets)
         self.assertEqual(self.widgets["hf-transfers-panel"].group, "content-transfers")
         self.assertIsNone(self.widgets["hf-transfers-panel"].span)
         self.assertEqual(self.widgets["hf-activity-panel"].group, "content-transfers")
@@ -132,6 +146,11 @@ class V44UiTests(unittest.TestCase):
         self.assertEqual(results.options.selection.mode, "single")
         self.assertEqual(results.options.interaction.action_id, main.HF_RESULTS_TABLE_ID)
         self.assertTrue(all(column.sortable for column in results.options.columns))
+        self.assertEqual(
+            [column.key for column in results.options.columns],
+            ["repo", "fit", "size", "files", "downloads"],
+        )
+        self.assertTrue(all(column.filter == "none" for column in results.options.columns))
         self.assertEqual(results.options.feedback.state, "empty")
 
         search = self.widgets["hf-query"]
@@ -226,9 +245,7 @@ class V44UiTests(unittest.TestCase):
                 main._run_page()
 
             train = next(
-                node
-                for node in main.STATE.workflow.document.nodes
-                if node.template == "train"
+                node for node in main.STATE.workflow.document.nodes if node.template == "train"
             )
             self.assertEqual(train.position, (640.0, 160.0))
             persist.assert_called_once_with()
@@ -288,11 +305,7 @@ class V44UiTests(unittest.TestCase):
                     )
 
     def test_config_selects_label_unset_and_preserve_custom_yaml_values(self) -> None:
-        spec = next(
-            item
-            for item in main.FIELD_SPECS
-            if item.key == "attn_implementation"
-        )
+        spec = next(item for item in main.FIELD_SPECS if item.key == "attn_implementation")
 
         options = main._config_select_options(
             spec,
@@ -632,7 +645,7 @@ class V44UiTests(unittest.TestCase):
         self.assertEqual(repo_cell.copy_value, result.repo_id)
         self.assertEqual(repo_cell.status, "ok")
         self.assertEqual(row.cells[4], 12_345)
-        self.assertEqual(row.cells[5], 67)
+        self.assertEqual(len(row.cells), 5)
         self.assertTrue(row.loading)
         self.assertFalse(row.children)
         self.assertEqual(options.feedback.state, "ready")
@@ -646,6 +659,13 @@ class V44UiTests(unittest.TestCase):
         self.assertIn("hf-inspect-row", action_ids)
         self.assertIn("hf-use-row", action_ids)
         self.assertIn("hf-related-row", action_ids)
+        metadata = next(
+            item.text
+            for item in row.expanded_content
+            if isinstance(item, lcars.TableDetailText) and "downloads" in item.text
+        )
+        self.assertIn("67 likes", metadata)
+        self.assertIn("updated 2026-07-23", metadata)
 
     def test_hf_expansion_exposes_inspected_file_actions_and_config_marker(self) -> None:
         original_results = main.STATE.hf.search_results
@@ -691,14 +711,11 @@ class V44UiTests(unittest.TestCase):
             main.STATE.hf.last_repo_id = original_repo_id
             main.STATE.hf.last_repo_type = original_repo_type
 
-        self.assertIn("CONFIGURED", row.cells[0].display)
-        self.assertIn("MANIFEST", row.cells[0].display)
+        self.assertTrue(row.cells[0].display.startswith("◆● "))
         self.assertEqual(row.cells[0].status, "ok")
         self.assertFalse(row.loading)
         detail_table = next(
-            item
-            for item in row.expanded_content
-            if isinstance(item, lcars.TableDetailTable)
+            item for item in row.expanded_content if isinstance(item, lcars.TableDetailTable)
         )
         file_row = detail_table.rows[0]
         self.assertTrue(file_row.cells[0].copyable)

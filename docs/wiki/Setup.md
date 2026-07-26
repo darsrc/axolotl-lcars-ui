@@ -79,12 +79,11 @@ The Workflow page uses LCARS WebUI's typed node canvas as an executable Axolotl 
 
 Set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` in your shell when downloading private repos or pushing prepared datasets/models.
 
-The HF Hub is a content-sized discovery workspace. Its repository browser, unified Hub query,
-advanced result filters, and selected-repository actions form one workflow; the
-transfer queue and activity log now live with cache operations on the **Content** page. Use the
-rail's **Arrange** control to move or resize panels. Edge drops place a panel beside or
-above/below another; **+ Row**, **+ Column**, and **+ Section** create explicit workflow bands.
-The repository table remains the center of the workflow:
+The HF Hub is a responsive master/detail discovery workspace. The repository browser owns the
+main lane; its operations rail keeps the unified Hub query and selected-repository actions above
+advanced filters, and automatically stacks below results on compact screens. The transfer queue
+and activity log live with cache operations on the **Content** page. The repository table remains
+the center of the workflow:
 
 - Click a row to target Selected Repository Actions.
 - Hub Query submits its mode, query/repository id, repo type, and optional revision atomically.

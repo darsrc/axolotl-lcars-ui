@@ -185,21 +185,28 @@ def disk_rows(disks: list[DiskInfo]) -> list[dict[str, str]]:
 
 def gpu_rows(gpus: list[GpuInfo]) -> list[dict[str, str]]:
     if not gpus:
-        return [{"GPU": "none", "Load": "0%", "VRAM": "0B / 0B", "Temp": "", "Power": ""}]
+        return [{"GPU": "none", "Status": "0% · 0B / 0B"}]
     rows = []
     for gpu in gpus:
-        power = ""
+        thermal = []
+        if gpu.temperature is not None:
+            thermal.append(f"{gpu.temperature:.0f}C")
         if gpu.power_draw is not None:
             power = f"{gpu.power_draw:.0f}W"
             if gpu.power_limit:
                 power = f"{power}/{gpu.power_limit:.0f}W"
+            thermal.append(power)
+        name = gpu.name.removeprefix("NVIDIA GeForce ").removeprefix("NVIDIA ")
         rows.append(
             {
-                "GPU": f"{gpu.index}: {gpu.name}",
-                "Load": f"{gpu.utilization:.0f}%",
-                "VRAM": f"{format_bytes(gpu.memory_used)} / {format_bytes(gpu.memory_total)}",
-                "Temp": "" if gpu.temperature is None else f"{gpu.temperature:.0f}C",
-                "Power": power,
+                "GPU": f"{gpu.index}: {name}",
+                "Status": " · ".join(
+                    [
+                        f"{gpu.utilization:.0f}%",
+                        f"{format_bytes(gpu.memory_used)} / {format_bytes(gpu.memory_total)}",
+                        *thermal,
+                    ]
+                ),
             }
         )
     return rows
@@ -209,7 +216,9 @@ def process_rows(limit: int = 10) -> list[dict[str, str]]:
     """Return top local processes by resident memory, with sanitized command names."""
 
     rows = []
-    for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status", "cmdline"]):
+    for proc in psutil.process_iter(
+        ["pid", "name", "cpu_percent", "memory_info", "status", "cmdline"]
+    ):
         try:
             info = proc.info
             memory = info.get("memory_info")
@@ -229,12 +238,14 @@ def process_rows(limit: int = 10) -> list[dict[str, str]]:
         except (OSError, psutil.Error):
             continue
     rows.sort(key=lambda row: (int(row.pop("_rss")), float(row.pop("_cpu"))), reverse=True)
-    return rows[:limit] or [{"PID": "", "Process": "No process data available", "RAM": "", "CPU": "", "State": ""}]
+    return rows[:limit] or [
+        {"PID": "", "Process": "No process data available", "RAM": "", "CPU": "", "State": ""}
+    ]
 
 
 def gpu_process_rows(limit: int = 10) -> list[dict[str, str]]:
     if shutil.which("nvidia-smi") is None:
-        return [{"PID": "", "GPU": "nvidia-smi unavailable", "Process": "", "VRAM": ""}]
+        return [{"GPU Task": "nvidia-smi unavailable", "Process / VRAM": ""}]
     command = [
         "nvidia-smi",
         "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
@@ -249,9 +260,9 @@ def gpu_process_rows(limit: int = 10) -> list[dict[str, str]]:
             timeout=2.0,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return [{"PID": "", "GPU": "GPU process query failed", "Process": "", "VRAM": ""}]
+        return [{"GPU Task": "GPU process query failed", "Process / VRAM": ""}]
     if completed.returncode != 0 or not completed.stdout.strip():
-        return [{"PID": "", "GPU": "No active GPU compute processes", "Process": "", "VRAM": ""}]
+        return [{"GPU Task": "No active GPU compute processes", "Process / VRAM": ""}]
     rows = []
     for line in completed.stdout.splitlines():
         parts = [part.strip() for part in line.split(",")]
@@ -261,16 +272,18 @@ def gpu_process_rows(limit: int = 10) -> list[dict[str, str]]:
             used = int(float(parts[3]) * 1024 * 1024)
         except ValueError:
             used = 0
+        process_name = Path(parts[2].replace("\\", "/")).name or parts[2]
         rows.append(
             {
-                "PID": parts[1],
-                "GPU": parts[0][-12:],
-                "Process": Path(parts[2]).name or parts[2],
-                "VRAM": format_bytes(used),
+                "GPU Task": f"{parts[1]} · {parts[0][-6:]}",
+                "Process / VRAM": f"{process_name[:32]} · {format_bytes(used)}",
             }
         )
-    rows.sort(key=lambda row: _parse_size(row["VRAM"]), reverse=True)
-    return rows[:limit] or [{"PID": "", "GPU": "No active GPU compute processes", "Process": "", "VRAM": ""}]
+    rows.sort(
+        key=lambda row: _parse_size(row["Process / VRAM"].rsplit(" · ", 1)[-1]),
+        reverse=True,
+    )
+    return rows[:limit] or [{"GPU Task": "No active GPU compute processes", "Process / VRAM": ""}]
 
 
 def storage_hotspot_rows(
@@ -281,9 +294,17 @@ def storage_hotspot_rows(
 ) -> list[dict[str, str]]:
     candidates: list[tuple[str, Path, str]] = []
     if output_dir:
-        candidates.append(("Axolotl output_dir", _resolve_user_path(project_root, output_dir), "training outputs"))
+        candidates.append(
+            ("Axolotl output_dir", _resolve_user_path(project_root, output_dir), "training outputs")
+        )
     if prepared_path:
-        candidates.append(("Prepared dataset cache", _resolve_user_path(project_root, prepared_path), "dataset preprocessing"))
+        candidates.append(
+            (
+                "Prepared dataset cache",
+                _resolve_user_path(project_root, prepared_path),
+                "dataset preprocessing",
+            )
+        )
     candidates.extend(
         [
             ("Outputs root", project_root / "outputs", "training outputs"),

@@ -74,7 +74,8 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   as a manual override on the focused Console page.
 - Separate Axolotl action args and launcher args. Launcher args are placed after `--`, matching
   Axolotl's launcher command shape.
-- CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry.
+- CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry in
+  aligned overview/detail rows with compact GPU readouts and independent table scrolling.
 - LCARS WebUI v4.4 content-sized, viewport-aware mosaic layouts with edge-aware operator
   arrangement, editable rows, columns and sections, stable panel grouping, dense-page filler
   control, native sortable/filterable/pageable data tables, and an immersive typed node-graph
@@ -82,9 +83,11 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   stable selection, rich expandable details, linked/copyable cells, and inline actions; controls
   and logs are searchable; defaults and persisted preferences are validated and typed; and
   consequential process, download, and cache actions require confirmation.
-- Hugging Face model/dataset search in a content-aware four-panel discovery workspace with
-  a unified atomic search/exact-repository query, atomic filters, and independent search and
-  repository-target types; typed numeric/date sorting; local metadata filters; model
+- Hugging Face model/dataset search in a responsive master/detail workspace with a dominant
+  repository table and a unified operations rail for atomic search/exact-repository queries,
+  selected-repository actions, and advanced filters. The rail stacks below results on compact
+  screens. Search and repository-target types remain independent; typed sorting, local metadata
+  filters, model
   VRAM/data-size fit; compatibility classification; stable row selection; automatic metadata
   hydration for each visible result page; rich expandable metadata/file/lineage views; in-place
   inspect/copy/queue/config actions; fine-tune lookup; and filtered `snapshot_download` downloads

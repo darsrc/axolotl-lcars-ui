@@ -25,6 +25,7 @@ from axolotl_lcars_ui.hf_manager import (
 )
 from axolotl_lcars_ui.ollama import OllamaManager
 from axolotl_lcars_ui.resources import (
+    DiskInfo,
     TelemetrySampler,
     disk_rows,
     format_bytes,
@@ -64,6 +65,10 @@ COLLAPSIBLE_PANEL_OPTIONS = lcars.ContainerOptions(
     density="compact",
     overflow="auto",
     collapsible=True,
+)
+DENSE_PANEL_OPTIONS = lcars.ContainerOptions(
+    density="compact",
+    overflow="auto",
 )
 LOG_VIEW_OPTIONS = lcars.LogOptions(
     toolbar=True,
@@ -107,7 +112,13 @@ SETUP_REQUIRED_KEYS = {"base_model", "datasets.0.path"}
 HF_SORT_OPTIONS = ["downloads", "likes", "last_modified", "trending_score"]
 HF_QUERY_MODE_OPTIONS = ["Search Hub", "Inspect Exact Repository"]
 HF_COMPATIBILITY_OPTIONS = ["compatible files only", "include warnings and blocked"]
-HF_ARTIFACT_FILTER_OPTIONS = ["any artifact", "base/trainable models", "PEFT adapters", "datasets", "runtime only"]
+HF_ARTIFACT_FILTER_OPTIONS = [
+    "any artifact",
+    "base/trainable models",
+    "PEFT adapters",
+    "datasets",
+    "runtime only",
+]
 HF_QUANT_FILTER_OPTIONS = [
     "any weight format",
     "Transformers safetensors",
@@ -169,7 +180,10 @@ MODEL_PRESETS = [
 DATASET_PRESETS = {
     "teknium/GPT4-LLM-Cleaned | alpaca": ("teknium/GPT4-LLM-Cleaned", "alpaca"),
     "tatsu-lab/alpaca | alpaca": ("tatsu-lab/alpaca", "alpaca"),
-    "HuggingFaceH4/ultrachat_200k | chat_template": ("HuggingFaceH4/ultrachat_200k", "chat_template"),
+    "HuggingFaceH4/ultrachat_200k | chat_template": (
+        "HuggingFaceH4/ultrachat_200k",
+        "chat_template",
+    ),
     "./data/train.jsonl | completion": ("./data/train.jsonl", "completion"),
 }
 
@@ -409,7 +423,9 @@ def _restore_persisted_state() -> None:
     if repo_type in {"model", "dataset"}:
         STATE.hf.last_repo_type = repo_type  # type: ignore[assignment]
     STATE.hf.last_repo_id = str(UI_STATE.get("hf_repo_id", "") or "")
-    STATE.hf.local_sort = str(UI_STATE.get("hf_local_sort", STATE.hf.local_sort) or STATE.hf.local_sort)
+    STATE.hf.local_sort = str(
+        UI_STATE.get("hf_local_sort", STATE.hf.local_sort) or STATE.hf.local_sort
+    )
     STATE.hf.local_sort_desc = bool(UI_STATE.get("hf_local_sort_desc", STATE.hf.local_sort_desc))
     expanded = UI_STATE.get("hf_expanded_result_ids", [])
     if isinstance(expanded, list):
@@ -881,9 +897,7 @@ def _run_page() -> None:
                 id="workflow-start",
                 disabled=STATE.workflow.is_active or STATE.runner.is_running(),
                 options=lcars.ButtonOptions(
-                    confirm=(
-                        "Run every connected Axolotl stage in order with the active config?"
-                    ),
+                    confirm=("Run every connected Axolotl stage in order with the active config?"),
                     debounce_ms=750,
                     busy_label="Launching",
                 ),
@@ -1035,17 +1049,20 @@ def _console_page() -> None:
 
 
 def _resources_page() -> None:
-    with lcars.page("Resources", id="resources", layout="grid", fillers=False):
+    with lcars.page("Resources", id="resources", layout="console", fillers=False):
         snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
         cfg = _load_config_or_empty()
+        primary_disk = _primary_disk(snapshot.disks)
         with lcars.data_panel(
             "System Load",
             color="anakiwa",
             id="resource-load-panel",
-            weight=6,
+            zone="side",
+            weight=8,
             aspect="tall",
+            span=(2, 2),
             group="resource-overview",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            options=DENSE_PANEL_OPTIONS,
         ):
             meter_options = lcars.MeterOptions(
                 unit="%",
@@ -1072,26 +1089,18 @@ def _resources_page() -> None:
                 id="ram-gauge",
                 options=meter_options,
             )
-            lcars.metric(
-                "RAM Used",
-                f"{format_bytes(snapshot.ram_used)} / {format_bytes(snapshot.ram_total)}",
-                status=_percent_status(snapshot.ram_percent),
-                color="blue-bell",
-                id="ram-used-metric",
-            )
-
         with lcars.data_panel(
             "Resource Trend",
             color="anakiwa",
             id="resource-trend-panel",
+            zone="primary",
             weight=12,
             aspect="wide",
             group="resource-overview",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            options=DENSE_PANEL_OPTIONS,
         ):
             lcars.chart(
                 STATE.telemetry.chart_payload(),
-                title="Resource Trend",
                 color="anakiwa",
                 id="resource-chart",
                 options=lcars.ChartOptions(
@@ -1110,58 +1119,82 @@ def _resources_page() -> None:
             "GPU Telemetry",
             color="blue-bell",
             id="resource-gpu-panel",
+            zone="side",
             weight=9,
             aspect="wide",
-            group="resource-detail",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            span=(2, 3),
+            group="resource-compute",
+            options=DENSE_PANEL_OPTIONS,
         ):
             _enhanced_table(
                 gpu_rows(snapshot.gpus),
                 title="GPU Telemetry",
                 id="gpu-table",
-                filter_columns={"GPU", "Name"},
             )
 
         with lcars.data_panel(
-            "Process Telemetry",
+            "CPU / RAM Processes",
             color="lilac",
             id="resource-process-panel",
+            zone="primary",
             weight=10,
             aspect="wide",
-            group="resource-detail",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            group="resource-compute",
+            options=DENSE_PANEL_OPTIONS,
         ):
             _enhanced_table(
                 process_rows(),
                 title="Top RAM / CPU Processes",
                 id="process-table",
                 filter_columns={"PID", "Process", "State"},
-                page_size=10,
+                page_size=5,
             )
+
+        with lcars.data_panel(
+            "Active GPU Processes",
+            color="blue-bell",
+            id="resource-gpu-process-panel",
+            zone="side",
+            weight=8,
+            aspect="wide",
+            span=(2, 3),
+            group="resource-compute",
+            options=DENSE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 gpu_process_rows(),
                 title="GPU Processes",
                 id="gpu-process-table",
-                filter_columns={"PID", "GPU", "Process"},
-                page_size=10,
             )
 
         with lcars.data_panel(
-            "Storage Telemetry",
+            "Mounted Storage",
             color="golden-tanoi",
             id="resource-storage-panel",
+            zone="primary",
             weight=9,
             aspect="wide",
             group="resource-storage",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            options=DENSE_PANEL_OPTIONS,
         ):
             _enhanced_table(
                 disk_rows(snapshot.disks),
-                title="Mounted Disks",
+                title="Mounted Filesystems",
                 id="disk-table",
                 filter_columns={"Device", "Mount"},
-                copy_columns={"Device", "Mount"},
+                copy_columns={"Mount"},
             )
+
+        with lcars.data_panel(
+            "Training Storage Hotspots",
+            color="golden-tanoi",
+            id="resource-storage-hotspots-panel",
+            zone="primary",
+            weight=8,
+            aspect="wide",
+            group="resource-storage",
+            options=DENSE_PANEL_OPTIONS,
+        ):
             _enhanced_table(
                 _storage_rows(cfg),
                 title="Storage Hotspots",
@@ -1170,18 +1203,76 @@ def _resources_page() -> None:
                 copy_columns={"Path"},
             )
 
+        with lcars.data_panel(
+            "Storage Pressure",
+            color="golden-tanoi",
+            id="resource-storage-pressure-panel",
+            zone="side",
+            weight=7,
+            aspect="tall",
+            span=(2, 3),
+            group="resource-storage",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            disk_percent = primary_disk.percent if primary_disk is not None else 0.0
+            lcars.gauge(
+                f"Volume Load · {primary_disk.mountpoint if primary_disk is not None else 'none'}",
+                disk_percent,
+                unit="%",
+                warn_threshold=85,
+                crit_threshold=95,
+                id="disk-usage-gauge",
+                options=lcars.MeterOptions(
+                    unit="%",
+                    segments=20,
+                    ticks=True,
+                    warn_threshold=85,
+                    crit_threshold=95,
+                ),
+            )
+            lcars.metric(
+                "Disk Free",
+                format_bytes(primary_disk.free) if primary_disk is not None else "unavailable",
+                status=_percent_status(disk_percent, warn=85, crit=95),
+                color="golden-tanoi",
+                id="disk-free-metric",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        format_bytes(primary_disk.total)
+                        if primary_disk is not None
+                        else "no mounted volume"
+                    ),
+                ),
+            )
+            lcars.metric(
+                "RAM Used",
+                f"{format_bytes(snapshot.ram_used)} / {format_bytes(snapshot.ram_total)}",
+                status=_percent_status(snapshot.ram_percent),
+                color="blue-bell",
+                id="ram-used-metric",
+            )
+
 
 def _hub_page() -> None:
     _handle_hf_table_action()
-    with lcars.page("HF Hub", id="hub", layout="grid", fillers=False):
+    with lcars.page("HF Hub", id="hub", layout="telemetry", fillers=False):
+        repo_id = _widget_value("hf-repo-id", STATE.hf.last_repo_id).strip()
+        target_repo_type = _widget_value(
+            "hf-repo-type",
+            STATE.hf.last_repo_type,
+        )
+        selected_result = _hf_result_for(repo_id)
+        selected_blocked = bool(selected_result is not None and selected_result.blocked)
+
         with lcars.data_panel(
             "Repository Browser",
             color="lilac",
             id="hf-results-panel",
-            weight=8,
+            zone="primary",
+            weight=12,
             aspect="wide",
-            group="hf-discovery",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            group="hf-browser",
+            options=DENSE_PANEL_OPTIONS,
         ):
             lcars.table(
                 _hf_result_rows(),
@@ -1192,16 +1283,17 @@ def _hub_page() -> None:
             )
 
         with lcars.control_panel(
-            "Hub Query",
+            "Hub Operations",
             color="lilac",
-            id="hf-search-panel",
-            weight=8,
+            id="hf-operations-panel",
+            zone="primary",
+            weight=10,
             aspect="wide",
-            group="hf-discovery",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            group="hf-browser",
+            options=DENSE_PANEL_OPTIONS,
         ):
             with lcars.form(
-                "",
+                "Repository Query",
                 action_id="hf-search",
                 submit_label="Run Query",
                 id="hf-search-form",
@@ -1270,22 +1362,55 @@ def _hub_page() -> None:
                         ),
                     )
 
-        with lcars.control_panel(
-            "Result Filters",
-            color="blue-bell",
-            id="hf-filter-panel",
-            weight=5,
-            aspect="wide",
-            group="hf-discovery",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
-        ):
+            lcars.header(
+                "Selected Repository",
+                size="h4",
+                color="tanoi",
+                id="hf-selected-heading",
+            )
+            lcars.text(
+                repo_id or "No repository selected.",
+                size="mono",
+                id="hf-selected-repo-copy",
+                options=_hf_selected_text_options(
+                    repo_id,
+                    target_repo_type,
+                ),
+            )
+            if lcars.button(
+                "Find Fine-Tunes",
+                color="lilac",
+                id="hf-related",
+                disabled=not bool(repo_id.strip()) or target_repo_type != "model",
+            ):
+                _hf_related_action(repo_id)
+            if lcars.button(
+                "Download Compatible Files",
+                color="golden-tanoi",
+                id="hf-download",
+                disabled=not bool(repo_id.strip()) or selected_blocked,
+                options=lcars.ButtonOptions(
+                    confirm="Queue the compatible files from this repository?",
+                    debounce_ms=750,
+                    busy_label="Queueing",
+                ),
+            ):
+                _hf_download_action(repo_id, target_repo_type, revision)
+            if lcars.button(
+                "Use Repo In Config",
+                color="tanoi",
+                id="hf-use-repo",
+                disabled=not bool(repo_id.strip()) or selected_blocked,
+            ):
+                _hf_use_repo_action(repo_id, target_repo_type)
+
             with lcars.form(
-                "",
+                "Result Filters",
                 action_id="hf-filter-results",
                 submit_label="Apply / Refresh Results",
                 id="hf-filter-form",
                 color="blue-bell",
-                options=lcars.FormOptions(layout="grid", columns=2),
+                options=lcars.FormOptions(layout="grid", columns=1),
             ):
                 sort = lcars.select(
                     "Hub Sort",
@@ -1359,59 +1484,6 @@ def _hub_page() -> None:
                     fit_filter=fit_filter,
                     vram_limit=vram_limit,
                 )
-
-        repo_id = _widget_value("hf-repo-id", STATE.hf.last_repo_id).strip()
-        target_repo_type = _widget_value(
-            "hf-repo-type",
-            STATE.hf.last_repo_type,
-        )
-        selected_result = _hf_result_for(repo_id)
-        selected_blocked = bool(selected_result is not None and selected_result.blocked)
-
-        with lcars.control_panel(
-            "Selected Repository Actions",
-            color="tanoi",
-            id="hf-workflow-panel",
-            weight=7,
-            aspect="wide",
-            group="hf-selection",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
-        ):
-            lcars.text(
-                repo_id or "No repository selected.",
-                size="mono",
-                id="hf-selected-repo-copy",
-                options=_hf_selected_text_options(
-                    repo_id,
-                    target_repo_type,
-                ),
-            )
-            if lcars.button(
-                "Find Fine-Tunes",
-                color="lilac",
-                id="hf-related",
-                disabled=not bool(repo_id.strip()) or target_repo_type != "model",
-            ):
-                _hf_related_action(repo_id)
-            if lcars.button(
-                "Download Compatible Files",
-                color="golden-tanoi",
-                id="hf-download",
-                disabled=not bool(repo_id.strip()) or selected_blocked,
-                options=lcars.ButtonOptions(
-                    confirm="Queue the compatible files from this repository?",
-                    debounce_ms=750,
-                    busy_label="Queueing",
-                ),
-            ):
-                _hf_download_action(repo_id, target_repo_type, revision)
-            if lcars.button(
-                "Use Repo In Config",
-                color="tanoi",
-                id="hf-use-repo",
-                disabled=not bool(repo_id.strip()) or selected_blocked,
-            ):
-                _hf_use_repo_action(repo_id, target_repo_type)
 
 
 def _content_page() -> None:
@@ -1581,7 +1653,9 @@ def _ollama_page() -> None:
             group="ollama-workflow",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
-            _seed_text("ollama-model-name", STATE.ollama.models[0].name if STATE.ollama.models else "")
+            _seed_text(
+                "ollama-model-name", STATE.ollama.models[0].name if STATE.ollama.models else ""
+            )
             model_name = lcars.text_input(
                 "Ollama Model Name",
                 placeholder="name:tag",
@@ -1637,18 +1711,54 @@ def _setup_smart_panel() -> None:
         if lcars.button("Use HF Selection", color="lilac", id="setup-use-hf"):
             _hf_use_repo_action(STATE.hf.last_repo_id, STATE.hf.last_repo_type)
         if lcars.button("Search Model Preset", color="blue-bell", id="setup-search-model"):
-            _hf_search_action(model, "model", sort="downloads", compatibility=HF_COMPATIBILITY_OPTIONS[0], limit="12")
+            _hf_search_action(
+                model,
+                "model",
+                sort="downloads",
+                compatibility=HF_COMPATIBILITY_OPTIONS[0],
+                limit="12",
+            )
 
 
 def _setup_default_rows() -> list[dict[str, str]]:
     cfg = _load_config_or_empty()
     specs = [
-        ("base_model", "Required", "None", "NousResearch/Llama-3.2-1B", "HF model id or local Transformers directory"),
-        ("datasets.0.path", "Required", "None", "teknium/GPT4-LLM-Cleaned", "HF dataset id, local file, or local directory"),
+        (
+            "base_model",
+            "Required",
+            "None",
+            "NousResearch/Llama-3.2-1B",
+            "HF model id or local Transformers directory",
+        ),
+        (
+            "datasets.0.path",
+            "Required",
+            "None",
+            "teknium/GPT4-LLM-Cleaned",
+            "HF dataset id, local file, or local directory",
+        ),
         ("datasets.0.type", "Recommended", "None", "alpaca", "Axolotl formatter strategy"),
-        ("datasets.0.ds_type", "Optional", "Infer local file extension", "json", "Only needed for local files/directories"),
-        ("sequence_len", "Required for most runs", "None", "2048", "Context length used for tokenization/training"),
-        ("sample_packing", "Optional", "Unset unless configured", "true", "Packs multiple samples into one sequence"),
+        (
+            "datasets.0.ds_type",
+            "Optional",
+            "Infer local file extension",
+            "json",
+            "Only needed for local files/directories",
+        ),
+        (
+            "sequence_len",
+            "Required for most runs",
+            "None",
+            "2048",
+            "Context length used for tokenization/training",
+        ),
+        (
+            "sample_packing",
+            "Optional",
+            "Unset unless configured",
+            "true",
+            "Packs multiple samples into one sequence",
+        ),
         ("val_set_size", "Optional", "Unset", "0.1", "Validation split fraction or count"),
         ("load_in_8bit", "Optional", "false", "true", "Lower VRAM LoRA starter mode"),
         ("load_in_4bit", "Optional", "false", "false", "QLoRA starter switches this on"),
@@ -1674,6 +1784,12 @@ def _storage_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
     return storage_hotspot_rows(PROJECT_ROOT, output_dir=output_dir, prepared_path=prepared_path)
 
 
+def _primary_disk(disks: list[DiskInfo]) -> DiskInfo | None:
+    if not disks:
+        return None
+    return next((disk for disk in disks if disk.mountpoint == "/"), disks[0])
+
+
 def _hf_job_rows() -> list[dict[str, str]]:
     rows = STATE.hf.job_rows()
     return rows or [
@@ -1690,30 +1806,33 @@ def _hf_job_rows() -> list[dict[str, str]]:
 
 def _hf_result_table_options() -> lcars.TableOptions:
     visible_results = _hf_visible_results()
-    sort_key = STATE.hf.local_sort if STATE.hf.local_sort in {
-        "repo",
-        "fit",
-        "size",
-        "files",
-        "downloads",
-        "likes",
-        "updated",
-    } else "downloads"
+    sort_key = (
+        STATE.hf.local_sort
+        if STATE.hf.local_sort
+        in {
+            "repo",
+            "fit",
+            "size",
+            "files",
+            "downloads",
+            "likes",
+            "updated",
+        }
+        else "downloads"
+    )
     direction = "desc" if STATE.hf.local_sort_desc else "asc"
+    visible_sort_keys = {"repo", "fit", "size", "files", "downloads"}
     visible_ids = {_hf_result_row_id(result) for result in visible_results}
     selected_ids = [
-        _hf_result_row_id(result)
-        for result in visible_results
-        if _hf_result_is_current(result)
+        _hf_result_row_id(result) for result in visible_results if _hf_result_is_current(result)
     ]
-    expanded_ids = [
-        row_id for row_id in STATE.hf.expanded_result_ids if row_id in visible_ids
-    ]
+    expanded_ids = [row_id for row_id in STATE.hf.expanded_result_ids if row_id in visible_ids]
     return lcars.TableOptions(
         description=(
             "Select a row to target repository commands. Expand it to lazily load compatibility, "
             "lineage, exact files, related models, and inline actions. Repository ids link to "
-            "Hugging Face and have dedicated copy controls."
+            "Hugging Face and have dedicated copy controls. ◆ marks the active config and ● marks "
+            "an inspected manifest."
         ),
         feedback=lcars.WidgetFeedback(
             state="ready" if visible_results else "empty",
@@ -1725,21 +1844,18 @@ def _hf_result_table_options() -> lcars.TableOptions:
                 label="Repository",
                 sortable=True,
                 first_sort_direction="asc",
-                filter="text",
             ),
             lcars.TableColumn(
                 key="fit",
                 label="Fit",
                 sortable=True,
                 first_sort_direction="asc",
-                filter="select",
             ),
             lcars.TableColumn(
                 key="size",
-                label="Weights / Quants",
+                label="Artifact",
                 sortable=True,
                 first_sort_direction="desc",
-                filter="text",
             ),
             lcars.TableColumn(
                 key="files",
@@ -1747,7 +1863,6 @@ def _hf_result_table_options() -> lcars.TableOptions:
                 value_type="number",
                 sortable=True,
                 first_sort_direction="desc",
-                filter="number",
                 align="end",
             ),
             lcars.TableColumn(
@@ -1756,29 +1871,15 @@ def _hf_result_table_options() -> lcars.TableOptions:
                 value_type="number",
                 sortable=True,
                 first_sort_direction="desc",
-                filter="number",
                 align="end",
                 value_format=lcars.ValueFormat(compact=True),
-            ),
-            lcars.TableColumn(
-                key="likes",
-                label="Likes",
-                value_type="number",
-                sortable=True,
-                first_sort_direction="desc",
-                filter="number",
-                align="end",
-                value_format=lcars.ValueFormat(compact=True),
-            ),
-            lcars.TableColumn(
-                key="updated",
-                label="Updated",
-                value_type="date",
-                sortable=True,
-                first_sort_direction="desc",
             ),
         ],
-        sort=[lcars.TableSort(key=sort_key, direction=direction)],
+        sort=(
+            [lcars.TableSort(key=sort_key, direction=direction)]
+            if sort_key in visible_sort_keys
+            else []
+        ),
         pagination=lcars.TablePagination(page_size=HF_RESULTS_PAGE_SIZE),
         selection=lcars.TableSelection(mode="single", selected_ids=selected_ids),
         expanded_ids=expanded_ids,
@@ -1798,8 +1899,7 @@ def _hf_visible_results() -> list[Any]:
     results = list(STATE.hf.search_results)
     details = STATE.hf.selected_details
     if details is not None and not any(
-        result.repo_id == details.result.repo_id
-        and result.repo_type == details.result.repo_type
+        result.repo_id == details.result.repo_id and result.repo_type == details.result.repo_type
         for result in results
     ):
         results.insert(0, details.result)
@@ -1838,10 +1938,7 @@ def _hf_configured_repositories() -> set[tuple[str, str]]:
 
 
 def _hf_result_is_current(result: Any) -> bool:
-    return (
-        result.repo_id == STATE.hf.last_repo_id
-        and result.repo_type == STATE.hf.last_repo_type
-    )
+    return result.repo_id == STATE.hf.last_repo_id and result.repo_type == STATE.hf.last_repo_type
 
 
 def _hf_result_is_inspected(result: Any) -> bool:
@@ -1861,12 +1958,8 @@ def _hf_result_status(result: Any, *, configured: bool, current: bool) -> str | 
 
 
 def _hf_result_display(result: Any, *, configured: bool, inspected: bool) -> str:
-    markers: list[str] = []
-    if configured:
-        markers.append("◆ CONFIGURED")
-    if inspected:
-        markers.append("● MANIFEST")
-    return " · ".join([result.repo_id, *markers])
+    markers = f"{'◆' if configured else ''}{'●' if inspected else ''}"
+    return f"{markers} {result.repo_id}".strip()
 
 
 def _hf_result_metadata(result: Any) -> str:
@@ -1875,6 +1968,10 @@ def _hf_result_metadata(result: Any) -> str:
         result.pipeline,
         result.library,
         result.params,
+        f"{result.file_count:,} files" if result.file_count else "",
+        f"{result.downloads:,} downloads" if result.downloads is not None else "",
+        f"{result.likes:,} likes" if result.likes is not None else "",
+        f"updated {result.updated}" if result.updated else "",
     ]
     return " · ".join(value for value in values if value) or "Inspect to classify this repository"
 
@@ -1961,9 +2058,7 @@ def _hf_result_detail_content(
         )
     content.append(lcars.TableDetailText(text=_hf_result_metadata(result)))
     if result.repo_type == "model":
-        content.append(
-            lcars.TableDetailText(text=_hf_result_lineage(result), tone="muted")
-        )
+        content.append(lcars.TableDetailText(text=_hf_result_lineage(result), tone="muted"))
     if details is None:
         content.append(
             lcars.TableDetailText(
@@ -2152,8 +2247,6 @@ def _hf_result_rows() -> list[lcars.TableRow]:
                     ),
                     result.file_count,
                     result.downloads,
-                    result.likes,
-                    result.updated or None,
                 ],
                 expanded_content=_hf_result_detail_content(
                     result,
@@ -2185,9 +2278,7 @@ def _handle_hf_table_action() -> None:
         if kind == "selection":
             selected_ids = table_state.get("selected_ids")
             selected_id = (
-                str(selected_ids[-1])
-                if isinstance(selected_ids, list) and selected_ids
-                else ""
+                str(selected_ids[-1]) if isinstance(selected_ids, list) and selected_ids else ""
             )
             selected = _hf_parse_result_row_id(selected_id)
             if selected is not None:
@@ -2208,13 +2299,9 @@ def _handle_hf_table_action() -> None:
                 if STATE.hf.details_for(repo_id, repo_type) is None:  # type: ignore[arg-type]
                     candidates.append((row_id, repo_type, repo_id))
             new_candidates = [
-                candidate
-                for candidate in candidates
-                if candidate[0] not in previous_expanded
+                candidate for candidate in candidates if candidate[0] not in previous_expanded
             ]
-            retry_candidates = (
-                candidates if set(expanded_ids) == previous_expanded else []
-            )
+            retry_candidates = candidates if set(expanded_ids) == previous_expanded else []
             inspect_candidates = new_candidates or retry_candidates
             if inspect_candidates:
                 _, repo_type, repo_id = inspect_candidates[0]
@@ -2319,9 +2406,21 @@ def _hf_selected_text_options(repo_id: str, repo_type: str) -> lcars.TextOptions
 
 def _ollama_rule_rows() -> list[dict[str, str]]:
     return [
-        {"Source": "Local Transformers dir", "Action": "Apply", "Reason": "config/tokenizer/weights can be read by Axolotl"},
-        {"Source": "hf.co / model name", "Action": "Search HF", "Reason": "find original safetensors repo or compatible fine-tune"},
-        {"Source": "GGUF/internal blob", "Action": "Block", "Reason": "runtime artifact, not an Axolotl base_model"},
+        {
+            "Source": "Local Transformers dir",
+            "Action": "Apply",
+            "Reason": "config/tokenizer/weights can be read by Axolotl",
+        },
+        {
+            "Source": "hf.co / model name",
+            "Action": "Search HF",
+            "Reason": "find original safetensors repo or compatible fine-tune",
+        },
+        {
+            "Source": "GGUF/internal blob",
+            "Action": "Block",
+            "Reason": "runtime artifact, not an Axolotl base_model",
+        },
     ]
 
 
@@ -2353,7 +2452,9 @@ def _render_config_fields(
             if include_headers:
                 safe_group_id = current_group.lower().replace(" ", "-").replace("/", "")
                 prefix = f"{id_prefix}-" if id_prefix else ""
-                lcars.header(current_group, size="h3", color="pale-canary", id=f"hdr-{prefix}{safe_group_id}")
+                lcars.header(
+                    current_group, size="h3", color="pale-canary", id=f"hdr-{prefix}{safe_group_id}"
+                )
                 note = CONFIG_GROUP_NOTES.get(current_group)
                 if note:
                     lcars.text(note, id=f"note-{prefix}{safe_group_id}")
@@ -2596,7 +2697,9 @@ def _run_preflight_action() -> None:
     errors = sum(1 for issue in issues if issue.severity == "error")
     warnings = sum(1 for issue in issues if issue.severity == "warn")
     if errors:
-        lcars.notify(f"Preflight blocked launch: {errors} error(s), {warnings} warning(s).", level="error")
+        lcars.notify(
+            f"Preflight blocked launch: {errors} error(s), {warnings} warning(s).", level="error"
+        )
     else:
         lcars.notify(f"Preflight passed with {warnings} warning(s).")
 
@@ -2698,9 +2801,7 @@ def _start_workflow_action() -> None:
             raise WorkflowError(f"Preflight blocked launch: {errors[0].detail}")
         plan = STATE.workflow.plan()
         STATE.workflow.start(STATE.runner, STATE.config_store.active_path)
-        lcars.notify(
-            f"Workflow started: {' → '.join(step.label for step in plan)}."
-        )
+        lcars.notify(f"Workflow started: {' → '.join(step.label for step in plan)}.")
         _update_workflow_widgets()
         lcars.update(
             "run-status",
@@ -2795,17 +2896,24 @@ def _start_axolotl_action(
             )
             return
         if launcher and action not in LAUNCHER_ACTIONS:
-            lcars.notify(f"{action} does not accept launcher mode. Clear Launcher and retry.", level="error")
+            lcars.notify(
+                f"{action} does not accept launcher mode. Clear Launcher and retry.", level="error"
+            )
             return
         if launcher_args.strip() and not launcher:
-            lcars.notify("Launcher Args require python, accelerate, or torchrun launcher mode.", level="error")
+            lcars.notify(
+                "Launcher Args require python, accelerate, or torchrun launcher mode.",
+                level="error",
+            )
             return
         if action in CONFIG_ACTIONS:
             issues = STATE.refresh_preflight()
             _update_preflight_widgets(issues)
             errors = [issue for issue in issues if issue.severity == "error"]
             if errors:
-                lcars.notify(f"Axolotl launch blocked by preflight: {errors[0].detail}", level="error")
+                lcars.notify(
+                    f"Axolotl launch blocked by preflight: {errors[0].detail}", level="error"
+                )
                 return
         STATE.runner.start(
             action,
@@ -2828,7 +2936,9 @@ def _stop_axolotl_action() -> None:
         return
     STATE.runner.stop()
     lcars.notify("Axolotl stop requested.")
-    lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
+    lcars.update(
+        "run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity()
+    )
     _update_workflow_widgets()
 
 
@@ -3008,8 +3118,13 @@ def _hf_use_repo_action(repo_id: str, repo_type: str) -> None:
             if result is not None and result.role == "peft_adapter":
                 STATE.config_store.apply_updates({"lora_model_dir": repo_id, "adapter": "lora"})
             elif _looks_gguf(repo_id) or (result is not None and result.blocked):
-                detail = result.compatibility if result is not None else "likely GGUF/runtime artifact"
-                lcars.notify(f"Refusing to set incompatible model repo as Axolotl base_model: {detail}", level="error")
+                detail = (
+                    result.compatibility if result is not None else "likely GGUF/runtime artifact"
+                )
+                lcars.notify(
+                    f"Refusing to set incompatible model repo as Axolotl base_model: {detail}",
+                    level="error",
+                )
                 return
             else:
                 STATE.config_store.apply_model(repo_id)
@@ -3075,7 +3190,9 @@ def _ollama_refresh_action() -> None:
 def _ollama_search_hf_action(model_name: str) -> None:
     model = STATE.ollama.select(model_name.strip())
     if model is None:
-        lcars.notify("Ollama model was not found. Refresh and enter the exact name:tag.", level="error")
+        lcars.notify(
+            "Ollama model was not found. Refresh and enter the exact name:tag.", level="error"
+        )
         return
     query = model.hf_query or model.hf_hint or model.name.split(":", 1)[0]
     results = STATE.hf.search(query, "model", limit=12, sort="downloads", compatible_only=True)
@@ -3096,10 +3213,14 @@ def _ollama_use_source_action(model_name: str) -> None:
         return
     model = STATE.ollama.select(model_name.strip())
     if model is None:
-        lcars.notify("Ollama model was not found. Refresh and enter the exact name:tag.", level="error")
+        lcars.notify(
+            "Ollama model was not found. Refresh and enter the exact name:tag.", level="error"
+        )
         return
     if not model.compatible:
-        lcars.notify(f"Blocked: {model.name} is not Axolotl-readable. {model.reason}", level="error")
+        lcars.notify(
+            f"Blocked: {model.name} is not Axolotl-readable. {model.reason}", level="error"
+        )
         return
     STATE.config_store.apply_model(model.compatible_path)
     lcars.notify(f"Applied Ollama source path to base_model: {model.compatible_path}")
@@ -3109,6 +3230,7 @@ def _ollama_use_source_action(model_name: str) -> None:
 
 def live_tick() -> None:
     snapshot = STATE.telemetry.sample()
+    primary_disk = _primary_disk(snapshot.disks)
     STATE.resource_tick += 1
     STATE.workflow.tick(STATE.runner)
     lcars.update("cpu-gauge", value=snapshot.cpu_percent)
@@ -3121,6 +3243,26 @@ def live_tick() -> None:
     lcars.update("gpu-table", **_table_payload(gpu_rows(snapshot.gpus)))
     lcars.update("process-table", **_table_payload(process_rows()))
     lcars.update("gpu-process-table", **_table_payload(gpu_process_rows()))
+    lcars.update(
+        "disk-usage-gauge",
+        value=primary_disk.percent if primary_disk is not None else 0.0,
+    )
+    lcars.update(
+        "disk-free-metric",
+        value=format_bytes(primary_disk.free) if primary_disk is not None else "unavailable",
+        status=(
+            _percent_status(primary_disk.percent, warn=85, crit=95)
+            if primary_disk is not None
+            else "warn"
+        ),
+        options=lcars.MetricOptions(
+            secondary_value=(
+                format_bytes(primary_disk.total)
+                if primary_disk is not None
+                else "no mounted volume"
+            ),
+        ).model_dump(mode="json"),
+    )
     lcars.update(
         "disk-table",
         **_table_payload(
@@ -3137,7 +3279,9 @@ def live_tick() -> None:
             ),
         )
     lcars.update("resource-chart", series=_series_payload(STATE.telemetry.chart_payload()))
-    lcars.update("run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity())
+    lcars.update(
+        "run-status", value=STATE.runner.status_label(), status=STATE.runner.status_severity()
+    )
     command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
     lcars.update("run-command-text", content=command[:500])
     _update_workflow_widgets()
@@ -3162,7 +3306,9 @@ def _update_preflight_widgets(issues: list[PreflightIssue]) -> None:
     errors = sum(1 for issue in issues if issue.severity == "error")
     warnings = sum(1 for issue in issues if issue.severity == "warn")
     lcars.update("preflight-table", **_table_payload(issue_rows(issues)))
-    lcars.update("run-gate-metric", value="BLOCKED" if errors else "READY", status="crit" if errors else "ok")
+    lcars.update(
+        "run-gate-metric", value="BLOCKED" if errors else "READY", status="crit" if errors else "ok"
+    )
     lcars.update("warning-count-metric", value=str(warnings), status="warn" if warnings else "ok")
 
 
@@ -3183,8 +3329,7 @@ def _update_config_widgets() -> None:
         "active-config-select",
         value=STATE.config_store.active_name,
         options=[
-            lcars.SelectOption(label=name, value=name).model_dump(mode="json")
-            for name in configs
+            lcars.SelectOption(label=name, value=name).model_dump(mode="json") for name in configs
         ],
     )
     try:
@@ -3296,7 +3441,9 @@ def _hf_result_for(repo_id: str) -> Any:
     return None
 
 
-def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] | None = None) -> FastAPI:
+def create_lcars_app(
+    ui_fn: Callable[[], None], *, live_fn: Callable[[], None] | None = None
+) -> FastAPI:
     pre_run_config = get_ctx().config
     build_ctx = _LCARSContext(
         mode=Mode.BUILD,
@@ -3314,7 +3461,9 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
     _install_manifest_refresh(app, ui_fn, build_ctx.config)
     event_bus = app.state.event_bus
 
-    async def _dsl_action_handler(action_id: str, value: Any, session_id: str = "http_fallback") -> None:
+    async def _dsl_action_handler(
+        action_id: str, value: Any, session_id: str = "http_fallback"
+    ) -> None:
         handle_ctx = _LCARSContext(
             mode=Mode.HANDLE,
             session_id=session_id,
@@ -3344,6 +3493,7 @@ def create_lcars_app(ui_fn: Callable[[], None], *, live_fn: Callable[[], None] |
     app.state.plugin_action_handlers["*"] = _dsl_action_handler
 
     if live_fn is not None:
+
         async def _live_loop() -> None:
             while True:
                 await asyncio.sleep(2.0)
@@ -3716,9 +3866,7 @@ def _enhanced_table(
         options=lcars.TableOptions(
             columns=columns or None,
             pagination=(
-                lcars.TablePagination(page_size=page_size)
-                if page_size is not None
-                else None
+                lcars.TablePagination(page_size=page_size) if page_size is not None else None
             ),
             sticky_header=True,
             density="compact",
@@ -3805,10 +3953,10 @@ def _series_payload(data: dict[str, list[float]]) -> list[dict[str, Any]]:
     return [{"name": name, "data": values} for name, values in data.items()]
 
 
-def _percent_status(value: float) -> str:
-    if value >= 92:
+def _percent_status(value: float, *, warn: float = 80, crit: float = 92) -> str:
+    if value >= crit:
         return "crit"
-    if value >= 80:
+    if value >= warn:
         return "warn"
     return "ok"
 

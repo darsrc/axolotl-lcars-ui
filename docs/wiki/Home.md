@@ -40,10 +40,11 @@ It is built with the pinned v4.4.0 release of
 - **Workflow**: editable lifecycle graph, preflight-gated sequential execution, node status,
   cancellation, and lifecycle controls.
 - **Console**: live Axolotl process output and the one-off action override.
-- **Resources**: local system telemetry and resource attribution.
-- **HF Hub**: content-aware repository browser, unified search/exact-repository query, advanced
-  result filters, and selected-repository actions with independent search/target types, lazy
-  expandable manifests, inline file/config actions, fine-tunes, and filtered downloads.
+- **Resources**: aligned system-load, process, GPU, filesystem, and storage-pressure telemetry
+  with independently scrolling detail tables.
+- **HF Hub**: responsive master/detail repository browser with results beside a unified operations
+  rail for search, selected-repository actions, and advanced filters; independent search/target
+  types, lazy expandable manifests, inline file/config actions, fine-tunes, and filtered downloads.
 - **Content**: transfer queue, Hub activity, downloaded content size, and cache cleanup.
 - **Ollama**: local Ollama detection and compatibility notes.
 
