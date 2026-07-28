@@ -33,9 +33,24 @@ Useful launch forms:
 
 The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 
+`launch.sh` prefers `.venv`, then `venv`, then a single other virtualenv directly inside the
+project. It exports that environment's `VIRTUAL_ENV` and prepends its `bin` directory to `PATH`,
+which lets the UI discover an `axolotl` executable installed there. To choose a specific
+environment:
+
+```bash
+AXOLOTL_LCARS_VENV=axolotl-training ./launch.sh
+```
+
+When no project virtualenv exists, the launcher uses `uv` to create `.venv` with Python 3.11 and
+installs `requirements.txt`. Axolotl itself remains a separate, accelerator-specific install. If
+`uv` is unavailable, the launcher exits with manual virtualenv instructions.
+
 ## Axolotl Requirement
 
-The UI can edit configs and manage content without Axolotl installed, but run launch is blocked until the `axolotl` executable is available on `PATH` inside the app environment.
+The UI can edit configs and manage content without Axolotl installed, but run launch is blocked
+until the `axolotl` executable is available inside the selected app virtualenv (or otherwise on
+its `PATH`).
 
 Install Axolotl according to the official docs for your CUDA/ROCm/Mac environment, then restart the UI.
 

@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="127.0.0.1"
 PORT="8000"
 OPEN_BROWSER="0"
+PYTHON_VERSION="3.11"
+VENV_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -22,7 +24,84 @@ Args:
   ip, --ip, host, --host Bind address (default: 127.0.0.1)
   port, --port           Bind port (default: 8000)
   open, --open           Open the app in the default browser
+
+Environment:
+  AXOLOTL_LCARS_VENV      Project venv path to use instead of auto-detection
 EOF
+}
+
+is_venv() {
+  [[ -f "$1/pyvenv.cfg" && -x "$1/bin/python" ]]
+}
+
+select_venv() {
+  local candidate=""
+  local config=""
+  local -a discovered=()
+
+  if [[ -n "${AXOLOTL_LCARS_VENV:-}" ]]; then
+    candidate="$AXOLOTL_LCARS_VENV"
+    if [[ "$candidate" != /* ]]; then
+      candidate="$ROOT_DIR/$candidate"
+    fi
+    if ! is_venv "$candidate"; then
+      echo "AXOLOTL_LCARS_VENV is not a usable virtualenv: $candidate" >&2
+      return 1
+    fi
+    VENV_DIR="$candidate"
+    return 0
+  fi
+
+  for candidate in "$ROOT_DIR/.venv" "$ROOT_DIR/venv"; do
+    if is_venv "$candidate"; then
+      VENV_DIR="$candidate"
+      return 0
+    fi
+  done
+
+  shopt -s nullglob dotglob
+  for config in "$ROOT_DIR"/*/pyvenv.cfg; do
+    candidate="${config%/pyvenv.cfg}"
+    if is_venv "$candidate"; then
+      discovered+=("$candidate")
+    fi
+  done
+  shopt -u nullglob dotglob
+
+  if [[ "${#discovered[@]}" -eq 1 ]]; then
+    VENV_DIR="${discovered[0]}"
+    return 0
+  fi
+  if [[ "${#discovered[@]}" -gt 1 ]]; then
+    echo "Multiple project virtualenvs were found:" >&2
+    printf '  %s\n' "${discovered[@]}" >&2
+    echo "Set AXOLOTL_LCARS_VENV to choose one." >&2
+    return 1
+  fi
+
+  return 2
+}
+
+create_venv() {
+  local uv_path=""
+
+  uv_path="$(command -v uv || true)"
+  if [[ -z "$uv_path" ]]; then
+    echo "No project virtualenv was found and uv is not installed." >&2
+    echo "Install uv, or create .venv manually with: python3 -m venv .venv" >&2
+    return 1
+  fi
+  if [[ -e "$ROOT_DIR/.venv" ]]; then
+    echo "$ROOT_DIR/.venv exists but is not a usable virtualenv." >&2
+    echo "Repair it, move it aside, or set AXOLOTL_LCARS_VENV to another environment." >&2
+    return 1
+  fi
+
+  VENV_DIR="$ROOT_DIR/.venv"
+  echo "No project virtualenv found; creating .venv with uv (Python $PYTHON_VERSION)..."
+  "$uv_path" venv --python "$PYTHON_VERSION" "$VENV_DIR"
+  echo "Installing the UI requirements into .venv..."
+  "$uv_path" pip install --python "$VENV_DIR/bin/python" -r "$ROOT_DIR/requirements.txt"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -66,10 +145,18 @@ if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
   exit 2
 fi
 
-if [[ ! -x "$ROOT_DIR/.venv/bin/python" ]]; then
-  echo "Missing venv at $ROOT_DIR/.venv. Create it with: python3 -m venv .venv" >&2
-  exit 1
+if select_venv; then
+  :
+else
+  select_status="$?"
+  if [[ "$select_status" -ne 2 ]]; then
+    exit "$select_status"
+  fi
+  create_venv
 fi
+
+export VIRTUAL_ENV="$VENV_DIR"
+export PATH="$VENV_DIR/bin${PATH:+:$PATH}"
 
 child_pid=""
 
@@ -89,7 +176,14 @@ if [[ "$OPEN_BROWSER" == "1" ]]; then
   args+=(--open)
 fi
 
+echo "Using virtual environment: $VENV_DIR"
+if command -v axolotl >/dev/null 2>&1; then
+  echo "Axolotl CLI: $(command -v axolotl)"
+else
+  echo "Axolotl CLI: not installed in $VENV_DIR (the UI will still start)"
+fi
 echo "Starting Axolotl LCARS UI at http://$HOST:$PORT/"
-PYTHONPATH="$ROOT_DIR/src" "$ROOT_DIR/.venv/bin/python" -m axolotl_lcars_ui.main "${args[@]}" &
+PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+  "$VENV_DIR/bin/python" -m axolotl_lcars_ui.main "${args[@]}" &
 child_pid="$!"
 wait "$child_pid"

@@ -44,6 +44,19 @@ Start the app:
 ./launch.sh
 ```
 
+The launcher prefers `.venv`, then `venv`, then a single other virtualenv directly inside the
+project. It activates the selected environment for the child process, so an `axolotl` executable
+installed in that environment is visible to the UI. Select a specific environment when needed:
+
+```bash
+AXOLOTL_LCARS_VENV=axolotl-training ./launch.sh
+```
+
+If no project virtualenv exists, the launcher creates `.venv` with `uv` and installs the UI
+requirements. It does not install Axolotl automatically because its install depends on the
+machine's accelerator stack. If neither a virtualenv nor `uv` is available, the launcher prints
+manual setup instructions and exits.
+
 Useful launcher args:
 
 ```bash
