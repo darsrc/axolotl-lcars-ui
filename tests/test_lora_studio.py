@@ -6,13 +6,19 @@ import unittest
 from pathlib import Path
 
 from axolotl_lcars_ui.lora_studio import (
+    DEFAULT_LORA_PRESET,
     LORA_GOALS,
     LORA_MEMORY_PROFILES,
+    LORA_PRESETS,
+    LORA_TUNING_HINTS,
     LoraStudioError,
     beginner_config_updates,
+    chat_example_line,
     discover_adapter_artifacts,
+    infer_lora_preset,
     inspect_configured_dataset,
     inspect_jsonl_text,
+    recommend_lora_preset,
     normalize_project_name,
     save_chat_jsonl,
     starter_dataset_template,
@@ -55,6 +61,55 @@ class LoraStudioTests(unittest.TestCase):
         self.assertTrue(qlora["load_in_4bit"])
         self.assertEqual(qlora["micro_batch_size"], 1)
 
+    def test_smart_presets_are_coherent_and_include_beginner_safety_defaults(self) -> None:
+        for preset in LORA_PRESETS:
+            with self.subTest(preset=preset.key):
+                updates = beginner_config_updates(
+                    "smart-project",
+                    base_model="unsloth/Llama-3.2-1B-Instruct",
+                    preset=preset.key,
+                )
+                self.assertNotEqual(updates["load_in_8bit"], updates["load_in_4bit"])
+                self.assertEqual(
+                    updates["adapter"] == "qlora",
+                    updates["load_in_4bit"],
+                )
+                self.assertEqual(updates["lora_alpha"], updates["lora_r"] * 2)
+                self.assertEqual(updates["datasets.0.roles_to_train"], "assistant")
+                self.assertTrue(updates["lora_target_linear"])
+                self.assertFalse(updates["train_on_inputs"])
+                self.assertEqual(updates["attn_implementation"], "sdpa")
+
+    def test_hardware_recommendation_and_existing_config_inference(self) -> None:
+        self.assertEqual(
+            recommend_lora_preset(8, "meta-llama/Llama-3.2-3B-Instruct"),
+            "low-vram",
+        )
+        self.assertEqual(
+            recommend_lora_preset(16, "meta-llama/Llama-3.2-3B-Instruct"),
+            DEFAULT_LORA_PRESET,
+        )
+        self.assertEqual(
+            recommend_lora_preset(24, "meta-llama/Llama-3.2-3B-Instruct"),
+            "high-detail",
+        )
+        self.assertEqual(
+            recommend_lora_preset(16, "mistralai/Mistral-7B-Instruct-v0.3"),
+            "low-vram",
+        )
+        self.assertEqual(
+            infer_lora_preset(
+                {
+                    "adapter": "lora",
+                    "lora_r": 8,
+                    "sequence_len": 1024,
+                    "num_epochs": 1,
+                }
+            ),
+            "quick-check",
+        )
+        self.assertGreaterEqual(len(LORA_TUNING_HINTS), 8)
+
     def test_starter_template_is_valid_jsonl_but_remains_an_explicit_draft(self) -> None:
         text = starter_dataset_template(LORA_GOALS[1], "Pathfinder")
         report = inspect_jsonl_text(text)
@@ -64,6 +119,21 @@ class LoraStudioTests(unittest.TestCase):
         self.assertGreater(report.placeholder_count, 0)
         self.assertFalse(report.ready)
         self.assertEqual(report.status, "DRAFT")
+
+    def test_easy_builder_creates_one_valid_openai_messages_line(self) -> None:
+        line = chat_example_line(
+            "Please help me recover this failed task.",
+            "I’ll inspect the error first, then retry the smallest safe step.",
+            system_prompt="Be calm and concise.",
+        )
+        payload = json.loads(line)
+        self.assertEqual(
+            [message["role"] for message in payload["messages"]],
+            ["system", "user", "assistant"],
+        )
+        self.assertTrue(inspect_jsonl_text(line).ready)
+        with self.assertRaises(LoraStudioError):
+            chat_example_line("A real prompt", "")
 
     def test_jsonl_shape_errors_are_line_specific(self) -> None:
         report = inspect_jsonl_text(

@@ -25,16 +25,26 @@ from axolotl_lcars_ui.hf_manager import (
     cache_summary_text,
 )
 from axolotl_lcars_ui.lora_studio import (
+    DEFAULT_LORA_PRESET,
     LORA_BASE_MODELS,
+    LORA_BASE_MODEL_HINTS,
     LORA_GOALS,
-    LORA_MEMORY_PROFILES,
+    LORA_GOAL_HINTS,
+    LORA_PRESETS,
+    LORA_PRESET_KEYS,
+    LORA_TUNING_HINTS,
     DatasetReport,
     LoraStudioError,
     beginner_config_updates,
+    chat_example_line,
     discover_adapter_artifacts,
+    get_lora_preset,
+    infer_lora_preset,
     inspect_configured_dataset,
     inspect_jsonl_text,
+    lora_tuning_hint,
     normalize_project_name,
+    recommend_lora_preset,
     save_chat_jsonl,
     starter_dataset_template,
     suggested_ollama_model,
@@ -82,6 +92,12 @@ COLLAPSIBLE_PANEL_OPTIONS = lcars.ContainerOptions(
     density="compact",
     overflow="auto",
     collapsible=True,
+)
+COLLAPSED_PANEL_OPTIONS = lcars.ContainerOptions(
+    density="compact",
+    overflow="auto",
+    collapsible=True,
+    initial_collapsed=True,
 )
 DENSE_PANEL_OPTIONS = lcars.ContainerOptions(
     density="compact",
@@ -206,6 +222,122 @@ DATASET_PRESETS = {
 
 LORA_BASE_MODEL_VALUES = tuple(value for _, value in LORA_BASE_MODELS)
 
+CONFIG_VALUE_HINTS: dict[str, dict[str, str]] = {
+    "adapter": {
+        "": "No adapter: all model weights may be trained. This is not a beginner LoRA run.",
+        "lora": "Standard LoRA. Faster and simpler when the base model fits in GPU memory.",
+        "qlora": "4-bit QLoRA. Choose this when standard LoRA runs out of GPU memory.",
+        "ia3": "A different parameter-efficient method; use only for an intentional IA3 config.",
+    },
+    "bf16": {
+        "auto": "Let Axolotl use BF16 when the GPU supports it.",
+        "true": "Require BF16. Training will fail on unsupported hardware.",
+        "false": "Disable BF16; another precision mode must cover training.",
+    },
+    "fp16": {
+        "unset": "Leave precision selection to BF16/other configured defaults.",
+        "true": "Use FP16 on GPUs without BF16 support.",
+        "false": "Explicitly disable FP16.",
+    },
+    "gradient_checkpointing": {
+        "": "Use Axolotl's default behavior.",
+        "true": "Save VRAM by recomputing activations; usually worth the speed cost.",
+        "false": "Use more VRAM for faster training.",
+        "offload": "Move checkpointed activations off GPU; slower, but can rescue a tight run.",
+        "offload_disk": "Last-resort disk offload with a large performance cost.",
+    },
+    "attn_implementation": {
+        "": "Use the model/Axolotl default attention implementation.",
+        "sdpa": "PyTorch scaled-dot-product attention; portable and a safe guided default.",
+        "flash_attention_2": "Often faster and leaner, but requires a compatible FlashAttention install.",
+        "eager": "Most compatible and easiest to debug, usually slower and more memory-hungry.",
+    },
+    "save_strategy": {
+        "": "Use the trainer default.",
+        "no": "Do not create intermediate checkpoints.",
+        "epoch": "Save after each full pass through the dataset; simple for small LoRA runs.",
+        "steps": "Save on a fixed step cadence for long datasets.",
+        "best": "Keep checkpoints according to evaluation quality; requires a working eval setup.",
+    },
+    "eval_strategy": {
+        "": "Use the trainer default.",
+        "no": "Skip validation during training.",
+        "epoch": "Evaluate after each full dataset pass; simple for small LoRA runs.",
+        "steps": "Evaluate on a fixed step cadence for long runs.",
+    },
+}
+
+CONFIG_FIELD_HINTS: dict[str, str] = {
+    "base_model": (
+        "The Hugging Face model id or local Transformers directory that the adapter modifies. "
+        "An adapter must later be used with this same model lineage."
+    ),
+    "datasets.0.path": (
+        "Training examples to imitate. Use a project-local file for the easiest validation, "
+        "or an exact Hugging Face dataset id."
+    ),
+    "datasets.0.type": (
+        "Tells Axolotl how each dataset record is shaped. Use chat_template for OpenAI-style "
+        "messages and completion for a single text field."
+    ),
+    "datasets.0.field_messages": (
+        "The record key containing the ordered role/content messages. Keep messages for the "
+        "guided JSONL template."
+    ),
+    "datasets.0.chat_template": (
+        "Converts messages to the model's exact control-token format. tokenizer_default is safest "
+        "when the chosen tokenizer includes a template."
+    ),
+    "datasets.0.roles_to_train": (
+        "Which message roles contribute to loss. Assistant-only prevents the model from learning "
+        "to imitate user prompts."
+    ),
+    "datasets.0.train_on_eos": (
+        "Controls which end-of-sequence tokens are learned. turn matches each trainable assistant "
+        "turn in the guided chat format."
+    ),
+    "val_set_size": (
+        "Fraction held out for validation during training. Around 0.05–0.1 is useful once the "
+        "dataset is large enough; keep separate held-out prompts for the final test too."
+    ),
+    "output_dir": (
+        "Directory for checkpoints and the final adapter. Use a unique project path so one run "
+        "cannot overwrite another."
+    ),
+    "lora_target_linear": (
+        "Applies LoRA to the model's linear layers without architecture-specific module names. "
+        "This is the portable guided default."
+    ),
+    "load_in_8bit": (
+        "Loads base weights in 8-bit for a standard guided LoRA run. Disable it when QLoRA's "
+        "4-bit loading is enabled."
+    ),
+    "load_in_4bit": (
+        "Loads base weights in 4-bit to minimize VRAM. Pair it with adapter=qlora, never with "
+        "8-bit loading."
+    ),
+    "pad_to_sequence_len": (
+        "Pads prepared batches to a consistent length. It can improve kernel efficiency but may "
+        "waste memory when example lengths vary widely."
+    ),
+    "warmup_steps": (
+        "Uses small optimizer updates at the beginning to reduce instability. Ten steps is a "
+        "conservative small-run default."
+    ),
+    "weight_decay": (
+        "Regularizes trainable weights. About 0.01 is a common default; high values can suppress "
+        "the small LoRA update."
+    ),
+    "save_strategy": (
+        "Controls when recoverable checkpoints are written. Epoch-based saving is easiest for "
+        "small datasets; step-based saving is better for long runs."
+    ),
+    "eval_strategy": (
+        "Controls when the validation split is measured. Match it to the save strategy if you "
+        "intend to choose the best checkpoint."
+    ),
+}
+
 SETUP_RECIPES: dict[str, dict[str, Any]] = {
     "LoRA SFT starter": {
         "adapter": "lora",
@@ -318,6 +450,22 @@ STATE.preflight = AxolotlPreflight(PROJECT_ROOT, STATE.ollama)
 UI_STATE = UiStateStore(PROJECT_ROOT)
 
 
+def _detected_gpu_vram_gb() -> float | None:
+    snapshot = STATE.telemetry.latest
+    if snapshot is None or not snapshot.gpus:
+        return None
+    total = snapshot.gpus[0].memory_total
+    return total / (1024**3) if total > 0 else None
+
+
+def _detected_gpu_label() -> str:
+    snapshot = STATE.telemetry.latest
+    if snapshot is None or not snapshot.gpus:
+        return "GPU VRAM not detected · using the balanced safe default"
+    gpu = snapshot.gpus[0]
+    return f"{gpu.name} · {gpu.memory_total / (1024**3):.1f} GB VRAM detected"
+
+
 def _persisted_widget_defaults() -> dict[str, Any]:
     """Typed fallbacks for every preference mirrored outside the active YAML."""
 
@@ -327,6 +475,10 @@ def _persisted_widget_defaults() -> dict[str, Any]:
         cfg = {}
     project_name = Path(STATE.config_store.active_name).stem
     base_model = str(cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
+    recommended_preset = recommend_lora_preset(
+        _detected_gpu_vram_gb(),
+        base_model,
+    )
     ollama_name = (
         STATE.ollama.selected.name
         if STATE.ollama.selected is not None
@@ -347,7 +499,7 @@ def _persisted_widget_defaults() -> dict[str, Any]:
         "lora-project-name": project_name,
         "lora-goal": LORA_GOALS[0],
         "lora-base-model": base_model,
-        "lora-memory-profile": LORA_MEMORY_PROFILES[0],
+        "lora-preset": recommended_preset,
         "lora-data-filename": f"{project_name}.jsonl",
         "lora-test-base-model": suggested_base,
         "lora-test-adapter-path": adapter_path,
@@ -398,7 +550,7 @@ def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
         "active-config-select": tuple(STATE.config_store.list_configs()),
         "lora-goal": tuple(LORA_GOALS),
         "lora-base-model": lora_base_choices,
-        "lora-memory-profile": tuple(LORA_MEMORY_PROFILES),
+        "lora-preset": tuple(LORA_PRESET_KEYS),
         "lora-test-base-model": ("", *ollama_names),
         "lora-test-chat-model": ("", *ollama_names),
         "lora-test-compare-base": ("", *ollama_names),
@@ -610,8 +762,10 @@ def _lora_home_page() -> None:
             lcars.markdown(
                 "A **LoRA** is a compact set of learned changes attached to a base model. "
                 "Use it for a repeatable voice, response style, decision pattern, or narrow skill. "
-                "The four guided pages below write a normal Axolotl config, so the advanced pages "
-                "remain available when you are ready.",
+                "You do not need to understand rank, alpha, quantization, or batch math to start: "
+                "the Setup page recommends a safe recipe for the detected GPU. The four guided "
+                "pages still write a normal Axolotl config, so every advanced field remains "
+                "available when you are ready.",
                 id="lora-home-explainer",
             )
             lcars.progress(
@@ -696,7 +850,12 @@ def _lora_setup_page() -> None:
     cfg = _load_config_or_empty()
     current_base = str(cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
     base_options = [
-        lcars.SelectOption(label=label, value=value) for label, value in LORA_BASE_MODELS
+        lcars.SelectOption(
+            label=label,
+            value=value,
+            description=LORA_BASE_MODEL_HINTS.get(value),
+        )
+        for label, value in LORA_BASE_MODELS
     ]
     if current_base and current_base not in LORA_BASE_MODEL_VALUES:
         base_options.insert(
@@ -704,33 +863,50 @@ def _lora_setup_page() -> None:
             lcars.SelectOption(
                 label=f"{current_base} · current custom model",
                 value=current_base,
+                description=(
+                    "Preserved from the active YAML. Confirm its architecture, access terms, "
+                    "chat template, and GPU fit before training."
+                ),
             ),
         )
     project_default = Path(STATE.config_store.active_name).stem
     _seed_text("lora-project-name", project_default)
+    recommended_key = recommend_lora_preset(
+        _detected_gpu_vram_gb(),
+        _widget_value("lora-base-model", current_base),
+    )
+    preset_default = _widget_value(
+        "lora-preset",
+        infer_lora_preset(cfg) if cfg else recommended_key,
+    )
+    if preset_default not in LORA_PRESET_KEYS:
+        preset_default = recommended_key
 
     with lcars.page("LoRA Setup", id="lora-setup", layout="grid", fillers=False):
         with lcars.control_panel(
-            "Beginner Setup",
+            "Make My LoRA",
             color="tanoi",
             id="lora-setup-wizard-panel",
-            weight=8,
-            aspect="tall",
-            group="lora-setup",
+            zone="full",
+            span=(4, 7),
+            weight=12,
+            aspect="wide",
+            group="lora-setup-wizard",
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
-                "Choose four things. The wizard fills the model, adapter, memory, optimizer, "
-                "dataset, output, and safety settings in a dedicated YAML config.",
+                "**The choices are already safe.** Give the project a name, pick what it should "
+                "learn, and press the button. The smart preset fills the adapter, rank, context, "
+                "batch, optimizer, precision, checkpoints, and output paths.",
                 id="lora-setup-help",
             )
             with lcars.form(
                 "LoRA Project",
                 action_id="lora-setup-save",
-                submit_label="Create / Save Guided Project",
+                submit_label="Create Project With Smart Defaults",
                 id="lora-setup-form",
                 color="tanoi",
-                options=lcars.FormOptions(layout="stack"),
+                options=lcars.FormOptions(layout="grid", columns=2),
             ):
                 project_name = lcars.text_input(
                     "Project Name",
@@ -747,35 +923,80 @@ def _lora_setup_page() -> None:
                         ),
                     ),
                 )
-                goal = lcars.select(
+                goal = lcars.radio(
                     "What Are You Teaching?",
-                    list(LORA_GOALS),
+                    [
+                        lcars.SelectOption(
+                            label=item,
+                            value=item,
+                            description=LORA_GOAL_HINTS[item],
+                        )
+                        for item in LORA_GOALS
+                    ],
                     value=LORA_GOALS[0],
                     id="lora-goal",
+                    settings=lcars.ChoiceOptions(
+                        description=(
+                            "This selects the starter-example template. It does not lock the "
+                            "adapter to one narrow capability."
+                        )
+                    ),
                 )
                 base_model = lcars.select(
                     "Base Model",
                     base_options,
                     value=current_base,
                     id="lora-base-model",
-                    settings=SEARCHABLE_CHOICES,
+                    settings=lcars.ChoiceOptions(
+                        searchable=True,
+                        description=(
+                            "The adapter only works with this model lineage. The 1B starter is "
+                            "the easiest way to prove the workflow."
+                        ),
+                    ),
                 )
-                memory_profile = lcars.select(
-                    "Memory Profile",
-                    list(LORA_MEMORY_PROFILES),
-                    value=LORA_MEMORY_PROFILES[0],
-                    id="lora-memory-profile",
+                recommended_key = recommend_lora_preset(
+                    _detected_gpu_vram_gb(),
+                    str(base_model),
+                )
+                preset_key = lcars.select(
+                    "How Should It Train?",
+                    _lora_preset_options(recommended_key),
+                    value=preset_default,
+                    id="lora-preset",
+                    settings=lcars.ChoiceOptions(
+                        description=(
+                            "Start with the recommended recipe. Change one setting only after a "
+                            "measured problem such as out-of-memory, truncation, or underfitting."
+                        )
+                    ),
                 )
             if _is_active_action("lora-setup-save"):
-                _lora_setup_action(project_name, goal, base_model, memory_profile)
+                _lora_setup_action(project_name, goal, base_model, preset_key)
+            chosen_preset = get_lora_preset(
+                preset_key if preset_key in LORA_PRESET_KEYS else DEFAULT_LORA_PRESET
+            )
+            lcars.text(
+                f"Selected: {chosen_preset.label}. {chosen_preset.summary}",
+                id="lora-setup-selected-summary",
+                options=lcars.TextOptions(
+                    description=(
+                        f"Best for: {chosen_preset.best_for}. "
+                        f"Hardware guidance: {chosen_preset.hardware}."
+                    ),
+                    wrap="wrap",
+                ),
+            )
 
         with lcars.data_panel(
-            "What The Wizard Chose",
+            "Active Project At A Glance",
             color="pale-canary",
             id="lora-setup-plan-panel",
-            weight=11,
+            zone="full",
+            span=(4, 1),
+            weight=10,
             aspect="wide",
-            group="lora-setup",
+            group="lora-setup-active",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
             _enhanced_table(
@@ -794,30 +1015,55 @@ def _lora_setup_page() -> None:
             )
 
         with lcars.data_panel(
-            "Memory Choice",
+            "Smart Presets",
             color="anakiwa",
-            id="lora-memory-help-panel",
-            weight=7,
+            id="lora-preset-help-panel",
+            zone="full",
+            span=(4, 2),
+            weight=12,
             aspect="wide",
-            group="lora-setup-help",
+            group="lora-presets",
             options=COLLAPSIBLE_PANEL_OPTIONS,
         ):
+            recommended = get_lora_preset(recommended_key)
+            lcars.metric(
+                "Recommended",
+                recommended.label,
+                status="ok",
+                color="anakiwa",
+                id="lora-preset-recommendation",
+                options=lcars.MetricOptions(
+                    secondary_value=_detected_gpu_label(),
+                ),
+            )
             _enhanced_table(
-                [
-                    {
-                        "Profile": LORA_MEMORY_PROFILES[0],
-                        "Use when": "You want the smoothest Ollama adapter-import path",
-                        "Tradeoff": "Uses more VRAM than QLoRA",
-                    },
-                    {
-                        "Profile": LORA_MEMORY_PROFILES[1],
-                        "Use when": "The balanced run does not fit on your GPU",
-                        "Tradeoff": "Ollama recommends non-quantized adapters for import",
-                    },
-                ],
-                title="Memory Profiles",
-                id="lora-memory-help-table",
-                filter_columns={"Profile"},
+                _lora_preset_rows(recommended_key),
+                title="Pick By Outcome, Not Acronym",
+                id="lora-preset-table",
+                filter_columns={"Preset", "Method", "Fit"},
+            )
+
+        with lcars.data_panel(
+            "What To Tune—And When",
+            color="lilac",
+            id="lora-tuning-help-panel",
+            zone="full",
+            span=(4, 2),
+            weight=12,
+            aspect="wide",
+            group="lora-tuning",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Leave these alone for the first real run. Change **one variable at a time**, "
+                "compare on held-out prompts, and keep the old config so you can undo the change.",
+                id="lora-tuning-help",
+            )
+            _enhanced_table(
+                _lora_tuning_rows(cfg),
+                title="Beginner Tuning Guide",
+                id="lora-tuning-table",
+                filter_columns={"Setting", "Current", "Starter range"},
             )
 
 
@@ -841,6 +1087,8 @@ def _lora_data_page() -> None:
             "Configured Dataset Readiness",
             color="golden-tanoi",
             id="lora-data-status-panel",
+            zone="full",
+            span=(4, 2),
             weight=10,
             aspect="wide",
             group="lora-data",
@@ -848,8 +1096,12 @@ def _lora_data_page() -> None:
         ):
             lcars.metric(
                 "Status",
-                report.status,
-                status="ok" if report.ready else ("crit" if report.errors else "warn"),
+                _lora_dataset_status(cfg, report),
+                status=(
+                    "ok"
+                    if _lora_dataset_trainable(cfg, report)
+                    else ("crit" if report.errors else "warn")
+                ),
                 color="golden-tanoi",
                 id="lora-data-status",
                 options=lcars.MetricOptions(secondary_value=report.source or "No source"),
@@ -884,24 +1136,111 @@ def _lora_data_page() -> None:
             )
 
         with lcars.control_panel(
-            "Training Example Editor",
-            color="golden-tanoi",
-            id="lora-data-editor-panel",
+            "Easy Conversation Builder",
+            color="tanoi",
+            id="lora-example-builder-panel",
+            zone="full",
+            span=(4, 10),
             weight=12,
-            aspect="tall",
-            group="lora-data",
+            aspect="wide",
+            group="lora-data-builder",
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
-                "Each line is one conversation. Replace every **EDIT ME** answer with the exact "
-                "response the model should imitate. Add more lines for different wording, edge "
-                "cases, corrections, boundaries, and failures.",
+                "Write one realistic prompt and the **exact answer you want the model to imitate**. "
+                "Press **Add & Save**, then repeat with different wording, difficulty, moods, "
+                "boundaries, and failure cases. The app creates the JSONL for you.",
+                id="lora-example-builder-help",
+            )
+            with lcars.form(
+                "One Training Conversation",
+                action_id="lora-example-add",
+                submit_label="Add & Save This Example",
+                id="lora-example-form",
+                color="tanoi",
+                options=lcars.FormOptions(layout="grid", columns=2),
+            ):
+                example_user = lcars.text_input(
+                    "What The User Says",
+                    value="",
+                    placeholder="Ask a realistic question or make a realistic request",
+                    autocomplete=False,
+                    id="lora-example-user",
+                    options=lcars.TextInputOptions(
+                        multiline=True,
+                        rows=2,
+                        description=(
+                            "Use natural wording. Vary easy, hard, ambiguous, and edge-case prompts."
+                        ),
+                        validation=lcars.ValidationOptions(required=True),
+                    ),
+                )
+                example_answer = lcars.text_input(
+                    "Exact Ideal Answer",
+                    value="",
+                    placeholder="Write the full answer—not instructions such as “be warm”",
+                    autocomplete=False,
+                    id="lora-example-answer",
+                    options=lcars.TextInputOptions(
+                        multiline=True,
+                        rows=3,
+                        description=(
+                            "This is the behavior the model copies. Include tone, reasoning style, "
+                            "format, uncertainty, and boundaries directly in the response."
+                        ),
+                        validation=lcars.ValidationOptions(required=True),
+                    ),
+                )
+                example_system = lcars.text_input(
+                    "System Instruction · optional",
+                    value="",
+                    placeholder="Only add this when the example needs a system role",
+                    autocomplete=False,
+                    id="lora-example-system",
+                    options=lcars.TextInputOptions(
+                        multiline=True,
+                        rows=1,
+                        description=(
+                            "Usually leave this blank; repeated system text can make the adapter "
+                            "depend on it."
+                        ),
+                    ),
+                )
+            if _is_active_action("lora-example-add"):
+                _lora_add_example_action(
+                    project_name=project_name,
+                    filename=_widget_value("lora-data-filename", filename_default),
+                    user_prompt=example_user,
+                    ideal_response=example_answer,
+                    system_prompt=example_system,
+                )
+            lcars.text(
+                "Your first form example replaces the untouched EDIT ME starter template. "
+                "Later examples are appended. The raw editor below is optional.",
+                id="lora-example-builder-note",
+            )
+
+        with lcars.control_panel(
+            "Advanced JSONL Editor",
+            color="golden-tanoi",
+            id="lora-data-editor-panel",
+            zone="full",
+            span=(4, 1),
+            weight=2,
+            aspect="wide",
+            group="lora-data-advanced",
+            options=COLLAPSED_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Use this only when you want to bulk-edit or paste JSONL. Each line is one "
+                "conversation. Replace every **EDIT ME** answer with the exact response the model "
+                "should imitate.",
                 id="lora-data-editor-help",
             )
             with lcars.form(
                 "JSONL Dataset",
                 action_id="lora-data-save",
-                submit_label="Validate & Save Draft",
+                submit_label="Validate & Save Raw JSONL",
                 id="lora-data-form",
                 color="golden-tanoi",
             ):
@@ -959,6 +1298,8 @@ def _lora_data_page() -> None:
             "Quality Beats Quantity",
             color="tanoi",
             id="lora-data-quality-panel",
+            zone="full",
+            span=(4, 2),
             weight=9,
             aspect="wide",
             group="lora-data-guide",
@@ -1003,7 +1344,8 @@ def _lora_train_page() -> None:
     dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
     artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
     errors = [issue for issue in STATE.preflight_issues if issue.severity == "error"]
-    can_train = not errors and dataset.ready and not STATE.workflow.is_active
+    dataset_trainable = _lora_dataset_trainable(cfg, dataset)
+    can_train = not errors and dataset_trainable and not STATE.workflow.is_active
     snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
     gpu = snapshot.gpus[0] if snapshot.gpus else None
 
@@ -1026,13 +1368,13 @@ def _lora_train_page() -> None:
                 color="red",
                 id="lora-train-gate",
                 options=lcars.MetricOptions(
-                    secondary_value=_lora_gate_detail(errors, dataset)
+                    secondary_value=_lora_gate_detail(errors, dataset, cfg)
                 ),
             )
             lcars.metric(
                 "Dataset",
-                dataset.status,
-                status="ok" if dataset.ready else "warn",
+                _lora_dataset_status(cfg, dataset),
+                status="ok" if dataset_trainable else "warn",
                 color="golden-tanoi",
                 id="lora-train-data-status",
                 options=lcars.MetricOptions(
@@ -1131,7 +1473,7 @@ def _lora_train_page() -> None:
             )
 
         with lcars.control_panel(
-            "Safe Training Controls",
+            "Train",
             color="golden-tanoi",
             id="lora-train-controls-panel",
             zone="dock",
@@ -1141,39 +1483,48 @@ def _lora_train_page() -> None:
             group="lora-training",
             options=DENSE_PANEL_OPTIONS,
         ):
+            lcars.markdown(
+                "**You only need Start Training.** It reruns every readiness check before launch. "
+                "The other buttons are optional diagnostics.",
+                id="lora-train-controls-help",
+            )
             if lcars.button(
-                "1 · Run Readiness Check",
-                color="anakiwa",
-                id="lora-train-preflight",
-            ):
-                _run_preflight_action()
-                _update_lora_widgets()
-            if lcars.button(
-                "2 · Prepare Dataset",
-                color="golden-tanoi",
-                id="lora-train-preprocess",
-                disabled=not dataset.ready or STATE.runner.is_running(),
-                options=lcars.ButtonOptions(
-                    confirm="Validate and preprocess the configured dataset with Axolotl?",
-                    debounce_ms=750,
-                    busy_label="Starting",
-                ),
-            ):
-                _lora_start_action("preprocess")
-            if lcars.button(
-                "3 · Start LoRA Training",
+                "Start Training",
                 color="red",
                 id="lora-train-start",
                 disabled=not can_train or STATE.runner.is_running(),
                 options=lcars.ButtonOptions(
                     confirm=(
-                        "Start GPU training with this active config? This can run for a long time."
+                        "Run the final safety checks and start LoRA training? "
+                        "Training can run for a long time."
                     ),
                     debounce_ms=750,
                     busy_label="Starting",
                 ),
             ):
                 _lora_start_action("train")
+            if lcars.button(
+                "Check Readiness",
+                color="anakiwa",
+                id="lora-train-preflight",
+            ):
+                _run_preflight_action()
+                _update_lora_widgets()
+            if lcars.button(
+                "Prepare Data Only · optional",
+                color="golden-tanoi",
+                id="lora-train-preprocess",
+                disabled=not dataset_trainable or STATE.runner.is_running(),
+                options=lcars.ButtonOptions(
+                    confirm=(
+                        "Run Axolotl preprocessing without starting training? "
+                        "This is useful for inspecting tokenized samples."
+                    ),
+                    debounce_ms=750,
+                    busy_label="Starting",
+                ),
+            ):
+                _lora_start_action("preprocess")
             if lcars.button(
                 "Stop Training",
                 color="red",
@@ -3417,6 +3768,64 @@ def _ollama_rule_rows() -> list[dict[str, str]]:
     ]
 
 
+def _lora_preset_options(recommended_key: str) -> list[lcars.SelectOption]:
+    return [
+        lcars.SelectOption(
+            label=(
+                f"{preset.label} · RECOMMENDED FOR THIS GPU"
+                if preset.key == recommended_key
+                else preset.label
+            ),
+            value=preset.key,
+            description=(
+                f"{preset.summary} Best for: {preset.best_for}. "
+                f"{preset.method}; {preset.speed.lower()}."
+            ),
+        )
+        for preset in LORA_PRESETS
+    ]
+
+
+def _lora_preset_rows(recommended_key: str) -> list[dict[str, str]]:
+    return [
+        {
+            "Fit": "RECOMMENDED" if preset.key == recommended_key else "OPTION",
+            "Preset": preset.label,
+            "Method": preset.method,
+            "Run shape": preset.speed,
+            "Best for": preset.best_for,
+            "Hardware": preset.hardware,
+        }
+        for preset in LORA_PRESETS
+    ]
+
+
+def _lora_tuning_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "Setting": hint.label,
+            "Current": _lora_setting_text(hint.key, cfg.get(hint.key)),
+            "Starter range": hint.starter_range,
+            "Change it when": hint.tune_when,
+            "Tradeoff": hint.tradeoff,
+        }
+        for hint in LORA_TUNING_HINTS
+    ]
+
+
+def _lora_setting_text(key: str, value: Any) -> str:
+    if value is None or value == "":
+        return "not set"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if key == "learning_rate":
+        try:
+            return f"{float(value):.6f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
 def _lora_journey_rows(
     cfg: dict[str, Any],
     dataset: DatasetReport,
@@ -3428,7 +3837,7 @@ def _lora_journey_rows(
         and str(cfg.get("output_dir") or "").strip()
     )
     training_ready = (
-        dataset.ready
+        _lora_dataset_trainable(cfg, dataset)
         and STATE.runner.axolotl_path is not None
         and not any(issue.severity == "error" for issue in STATE.preflight_issues)
     )
@@ -3442,7 +3851,9 @@ def _lora_journey_rows(
         },
         {
             "Step": "2 · Data",
-            "Status": "READY" if dataset.ready else "NEEDS EXAMPLES",
+            "Status": (
+                "READY" if _lora_dataset_trainable(cfg, dataset) else "NEEDS EXAMPLES"
+            ),
             "What happens": "Write and validate the ideal conversations to imitate",
             "Page": "?page=lora-data",
         },
@@ -3481,6 +3892,11 @@ def _lora_training_plan_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
         else ("8-bit base (LoRA)" if cfg.get("load_in_8bit") else "full-precision base")
     )
     return [
+        {
+            "Choice": "Smart preset",
+            "Value": get_lora_preset(infer_lora_preset(cfg)).label,
+            "Why": "Closest guided recipe to the active YAML values",
+        },
         {
             "Choice": "Base model",
             "Value": str(cfg.get("base_model") or "not chosen"),
@@ -3533,7 +3949,23 @@ def _lora_training_brief_rows(
         if dataset.example_count is None
         else f"{dataset.example_count} local example(s)"
     )
+    micro_batch = _bounded_int(
+        str(cfg.get("micro_batch_size") or 1),
+        default=1,
+        minimum=1,
+        maximum=1_000_000,
+    )
+    accumulation = _bounded_int(
+        str(cfg.get("gradient_accumulation_steps") or 1),
+        default=1,
+        minimum=1,
+        maximum=1_000_000,
+    )
     return [
+        {
+            "Check": "Preset",
+            "Value": get_lora_preset(infer_lora_preset(cfg)).label,
+        },
         {
             "Check": "Method",
             "Value": str(cfg.get("adapter") or "unset").upper(),
@@ -3543,8 +3975,16 @@ def _lora_training_brief_rows(
             "Value": examples,
         },
         {
-            "Check": "Epochs",
-            "Value": str(cfg.get("num_epochs") or "unset"),
+            "Check": "Shape",
+            "Value": (
+                f"rank {cfg.get('lora_r') or 'unset'} · "
+                f"{cfg.get('sequence_len') or 'unset'} tokens · "
+                f"batch {micro_batch * accumulation}"
+            ),
+        },
+        {
+            "Check": "Duration",
+            "Value": f"{cfg.get('num_epochs') or 'unset'} epoch(s)",
         },
         {
             "Check": "Output",
@@ -3569,13 +4009,37 @@ def _lora_dataset_issue_rows(report: DatasetReport) -> list[dict[str, str]]:
     return rows
 
 
-def _lora_gate_detail(errors: list[PreflightIssue], dataset: DatasetReport) -> str:
+def _lora_dataset_trainable(cfg: dict[str, Any], dataset: DatasetReport) -> bool:
+    if not dataset.ready:
+        return False
+    if dataset.source_kind != "local" or dataset.example_count is None:
+        return True
+    try:
+        validation_size = float(cfg.get("val_set_size") or 0)
+    except (TypeError, ValueError):
+        validation_size = 0.0
+    return validation_size <= 0 or dataset.example_count >= 2
+
+
+def _lora_dataset_status(cfg: dict[str, Any], dataset: DatasetReport) -> str:
+    if dataset.ready and not _lora_dataset_trainable(cfg, dataset):
+        return "ADD ONE MORE"
+    return dataset.status
+
+
+def _lora_gate_detail(
+    errors: list[PreflightIssue],
+    dataset: DatasetReport,
+    cfg: dict[str, Any] | None = None,
+) -> str:
     if not dataset.ready:
         if dataset.errors:
             return dataset.errors[0]
         if dataset.placeholder_count:
             return "Replace every EDIT ME placeholder first."
         return "Finish the training dataset first."
+    if cfg is not None and not _lora_dataset_trainable(cfg, dataset):
+        return "Add at least one more example so training and validation both have data."
     if errors:
         return errors[0].detail
     if STATE.workflow.is_active:
@@ -3695,6 +4159,7 @@ def _render_config_fields(
 def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
     value = STATE.config_store.control_value(spec, cfg)
     label = _field_label(spec)
+    help_text = _field_help(spec)
     if spec.kind in {"text", "csv_list", "json"}:
         # force: the active YAML owns config values, so a rebuilt manifest must not
         # keep showing what the previous build seeded.
@@ -3709,6 +4174,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                 options=lcars.TextInputOptions(
                     multiline=True,
                     rows=4,
+                    description=help_text,
                     validation=lcars.ValidationOptions(
                         required=spec.key in SETUP_REQUIRED_KEYS,
                     ),
@@ -3721,6 +4187,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             autocomplete=False,
             id=spec.widget_id,
             options=lcars.TextInputOptions(
+                description=help_text,
                 validation=lcars.ValidationOptions(
                     required=spec.key in SETUP_REQUIRED_KEYS,
                 ),
@@ -3739,7 +4206,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                     input_type="text",
                     description=(
                         f"Optional numeric value; leave blank for the Axolotl default. "
-                        f"Step: {spec.step:g}."
+                        f"Step: {spec.step:g}. {help_text}"
                     ),
                     validation=lcars.ValidationOptions(
                         pattern=r"^-?(?:\d+(?:\.\d*)?|\.\d+)?$",
@@ -3757,6 +4224,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             options=lcars.NumberInputOptions(
                 precision=_step_precision(spec.step),
                 required=True,
+                description=help_text,
             ),
         )
     if spec.kind == "bool":
@@ -3764,7 +4232,11 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             label,
             value=bool(value),
             id=spec.widget_id,
-            options=lcars.ToggleOptions(on_label="Enabled", off_label="Disabled"),
+            options=lcars.ToggleOptions(
+                on_label="Enabled",
+                off_label="Disabled",
+                description=help_text,
+            ),
         )
     if spec.kind == "tri_bool":
         selected = str(value if value not in (None, "") else "unset")
@@ -3773,12 +4245,25 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
         return lcars.select(
             label,
             [
-                lcars.SelectOption(label="Unset / Axolotl default", value="unset"),
-                lcars.SelectOption(label="Enabled", value="true"),
-                lcars.SelectOption(label="Disabled", value="false"),
+                lcars.SelectOption(
+                    label="Unset / Axolotl default",
+                    value="unset",
+                    description=CONFIG_VALUE_HINTS.get(spec.key, {}).get("unset"),
+                ),
+                lcars.SelectOption(
+                    label="Enabled",
+                    value="true",
+                    description=CONFIG_VALUE_HINTS.get(spec.key, {}).get("true"),
+                ),
+                lcars.SelectOption(
+                    label="Disabled",
+                    value="false",
+                    description=CONFIG_VALUE_HINTS.get(spec.key, {}).get("false"),
+                ),
             ],
             value=selected,
             id=spec.widget_id,
+            settings=lcars.ChoiceOptions(description=help_text),
         )
     selected = str(value if value not in (None, "") else (spec.default or ""))
     return lcars.select(
@@ -3786,7 +4271,10 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
         _config_select_options(spec, selected),
         value=selected,
         id=spec.widget_id,
-        settings=SEARCHABLE_CHOICES if len(spec.options) > 6 else None,
+        settings=lcars.ChoiceOptions(
+            searchable=len(spec.options) > 6,
+            description=help_text,
+        ),
     )
 
 
@@ -3800,6 +4288,7 @@ def _config_select_options(
         lcars.SelectOption(
             label="Unset / Axolotl default" if value == "" else value,
             value=value,
+            description=CONFIG_VALUE_HINTS.get(spec.key, {}).get(value),
         )
         for value in spec.options
     ]
@@ -3813,6 +4302,21 @@ def _config_select_options(
             ),
         )
     return options
+
+
+def _field_help(spec: FieldSpec) -> str:
+    specific = CONFIG_FIELD_HINTS.get(spec.key) or lora_tuning_hint(spec.key)
+    if specific:
+        return f"{specific} Axolotl key: {spec.key}."
+    expected = f" Expected value: {spec.placeholder}." if spec.placeholder else ""
+    optional = (
+        " Leave it unset unless this run specifically needs it."
+        if spec.optional
+        else ""
+    )
+    return (
+        f"Axolotl key: {spec.key}. Part of {spec.group}.{expected}{optional}"
+    )
 
 
 def _field_label(spec: FieldSpec) -> str:
@@ -4177,7 +4681,7 @@ def _lora_setup_action(
     project_name: str,
     goal: str,
     base_model: str,
-    memory_profile: str,
+    preset_key: str,
 ) -> None:
     if _workflow_blocks_config_change():
         return
@@ -4205,13 +4709,13 @@ def _lora_setup_action(
             beginner_config_updates(
                 slug,
                 base_model=base_model,
-                memory_profile=memory_profile,
+                preset=preset_key,
             )
         )
         _set_widget_value("lora-project-name", slug)
         _set_session_value("lora-goal", goal)
         _set_session_value("lora-base-model", base_model)
-        _set_session_value("lora-memory-profile", memory_profile)
+        _set_session_value("lora-preset", preset_key)
         _set_widget_value("lora-data-filename", f"{slug}.jsonl")
         _set_widget_value("lora-test-model-name", f"{slug}-lora")
         current_editor = _widget_value("lora-data-editor")
@@ -4228,15 +4732,21 @@ def _lora_setup_action(
         _update_preflight_widgets(issues)
         _update_lora_widgets()
         lcars.notify(
-            f"Guided project {slug} saved. Next, replace the EDIT ME examples on the Data page."
+            f"{get_lora_preset(preset_key).label} project {slug} saved. "
+            "Next, replace the EDIT ME examples on the Data page."
         )
     except Exception as exc:
         lcars.notify(f"Could not save guided LoRA setup: {exc}", level="error")
 
 
-def _lora_save_dataset_action(filename: str, editor_text: str) -> None:
+def _lora_save_dataset_action(
+    filename: str,
+    editor_text: str,
+    *,
+    notify: bool = True,
+) -> bool:
     if _workflow_blocks_config_change():
-        return
+        return False
     try:
         target, draft_report = save_chat_jsonl(
             PROJECT_ROOT,
@@ -4250,6 +4760,7 @@ def _lora_save_dataset_action(filename: str, editor_text: str) -> None:
                 "datasets.0.ds_type": "json",
                 "datasets.0.field_messages": "messages",
                 "datasets.0.chat_template": "tokenizer_default",
+                "datasets.0.roles_to_train": "assistant",
                 "datasets.0.train_on_eos": "turn",
             }
         )
@@ -4259,17 +4770,57 @@ def _lora_save_dataset_action(filename: str, editor_text: str) -> None:
         issues = STATE.refresh_preflight()
         _update_preflight_widgets(issues)
         _update_lora_widgets()
-        if draft_report.placeholder_count:
+        if notify and draft_report.placeholder_count:
             lcars.notify(
                 f"Saved {draft_report.example_count} example(s) as a draft. Replace "
                 f"{draft_report.placeholder_count} placeholder(s) before training."
             )
-        else:
+        elif notify:
             lcars.notify(
                 f"Dataset saved and configured: {draft_report.example_count} example(s)."
             )
+        return True
     except Exception as exc:
         lcars.notify(f"Dataset was not saved: {exc}", level="error")
+        return False
+
+
+def _lora_add_example_action(
+    *,
+    project_name: str,
+    filename: str,
+    user_prompt: str,
+    ideal_response: str,
+    system_prompt: str,
+) -> None:
+    try:
+        line = chat_example_line(
+            user_prompt,
+            ideal_response,
+            system_prompt=system_prompt,
+        )
+        current = _widget_value("lora-data-editor").strip()
+        replace_template = not current or _lora_editor_is_generated_template(
+            current,
+            project_name,
+        )
+        if current and not replace_template:
+            report = inspect_jsonl_text(current)
+            if report.errors:
+                raise LoraStudioError(
+                    "The advanced JSONL editor contains an error. Fix it or load a fresh "
+                    "template before adding form examples."
+                )
+        updated = line if replace_template else f"{current}\n{line}"
+        _set_widget_value("lora-data-editor", updated)
+        if _lora_save_dataset_action(filename, updated, notify=False):
+            _set_widget_value("lora-example-user", "")
+            _set_widget_value("lora-example-answer", "")
+            lcars.notify(
+                "Example added and saved. Add another with different wording or a harder case."
+            )
+    except Exception as exc:
+        lcars.notify(f"Could not add the training example: {exc}", level="error")
 
 
 def _lora_reset_dataset_template_action(goal: str, project_name: str) -> None:
@@ -4305,10 +4856,12 @@ def _lora_validate_dataset_action() -> None:
 
 
 def _lora_start_action(action: str) -> None:
-    dataset = inspect_configured_dataset(PROJECT_ROOT, _load_config_or_empty())
-    if not dataset.ready:
+    cfg = _load_config_or_empty()
+    dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    if not _lora_dataset_trainable(cfg, dataset):
         lcars.notify(
-            f"Training is blocked until the dataset is ready: {_lora_gate_detail([], dataset)}",
+            f"Training is blocked until the dataset is ready: "
+            f"{_lora_gate_detail([], dataset, cfg)}",
             level="error",
         )
         return
@@ -4852,7 +5405,12 @@ def _update_config_widgets() -> None:
     active_cfg = _load_config_or_empty()
     active_base = str(active_cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
     base_options = [
-        lcars.SelectOption(label=label, value=value) for label, value in LORA_BASE_MODELS
+        lcars.SelectOption(
+            label=label,
+            value=value,
+            description=LORA_BASE_MODEL_HINTS.get(value),
+        )
+        for label, value in LORA_BASE_MODELS
     ]
     if active_base not in LORA_BASE_MODEL_VALUES:
         base_options.insert(
@@ -4860,17 +5418,32 @@ def _update_config_widgets() -> None:
             lcars.SelectOption(
                 label=f"{active_base} · current custom model",
                 value=active_base,
+                description="Preserved from the active YAML.",
             ),
         )
     project_name = Path(STATE.config_store.active_name).stem
+    active_preset = infer_lora_preset(active_cfg)
+    recommended_preset = recommend_lora_preset(
+        _detected_gpu_vram_gb(),
+        active_base,
+    )
     store = get_session_state(get_ctx().session_id)
     store["lora-project-name"] = project_name
     store["lora-base-model"] = active_base
+    store["lora-preset"] = active_preset
     lcars.update("lora-project-name", value=project_name)
     lcars.update(
         "lora-base-model",
         value=active_base,
         options=[option.model_dump(mode="json") for option in base_options],
+    )
+    lcars.update(
+        "lora-preset",
+        value=active_preset,
+        options=[
+            option.model_dump(mode="json")
+            for option in _lora_preset_options(recommended_preset)
+        ],
     )
     try:
         values = STATE.config_store.editor_values()
@@ -4909,7 +5482,7 @@ def _update_lora_widgets() -> None:
     completed = sum(1 for row in steps if row["Status"] == "READY")
     can_train = (
         not errors
-        and dataset.ready
+        and _lora_dataset_trainable(cfg, dataset)
         and not STATE.workflow.is_active
         and not STATE.runner.is_running()
     )
@@ -4921,14 +5494,37 @@ def _update_lora_widgets() -> None:
         copy_columns={"Value"},
     )
     lcars.update("lora-setup-plan-table", **plan_payload)
+    recommended_preset = recommend_lora_preset(
+        _detected_gpu_vram_gb(),
+        str(cfg.get("base_model") or ""),
+    )
+    lcars.update(
+        "lora-preset-recommendation",
+        value=get_lora_preset(recommended_preset).label,
+        options=lcars.MetricOptions(
+            secondary_value=_detected_gpu_label(),
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-preset-table",
+        **_table_payload(_lora_preset_rows(recommended_preset)),
+    )
+    lcars.update(
+        "lora-tuning-table",
+        **_table_payload(_lora_tuning_rows(cfg)),
+    )
     lcars.update(
         "lora-train-plan-table",
         **_table_payload(_lora_training_brief_rows(cfg, dataset)),
     )
     lcars.update(
         "lora-data-status",
-        value=dataset.status,
-        status="ok" if dataset.ready else ("crit" if dataset.errors else "warn"),
+        value=_lora_dataset_status(cfg, dataset),
+        status=(
+            "ok"
+            if _lora_dataset_trainable(cfg, dataset)
+            else ("crit" if dataset.errors else "warn")
+        ),
         options=lcars.MetricOptions(
             secondary_value=dataset.source or "No source"
         ).model_dump(mode="json"),
@@ -4959,13 +5555,13 @@ def _update_lora_widgets() -> None:
         value="READY" if can_train else "BLOCKED",
         status="ok" if can_train else "crit",
         options=lcars.MetricOptions(
-            secondary_value=_lora_gate_detail(errors, dataset)
+            secondary_value=_lora_gate_detail(errors, dataset, cfg)
         ).model_dump(mode="json"),
     )
     lcars.update(
         "lora-train-data-status",
-        value=dataset.status,
-        status="ok" if dataset.ready else "warn",
+        value=_lora_dataset_status(cfg, dataset),
+        status="ok" if _lora_dataset_trainable(cfg, dataset) else "warn",
         options=lcars.MetricOptions(
             secondary_value=(
                 "remote"
@@ -4983,7 +5579,7 @@ def _update_lora_widgets() -> None:
     )
     lcars.update(
         "lora-train-preprocess",
-        disabled=not dataset.ready or STATE.runner.is_running(),
+        disabled=not _lora_dataset_trainable(cfg, dataset) or STATE.runner.is_running(),
     )
     lcars.update("lora-train-start", disabled=not can_train)
     lcars.update("lora-train-stop", disabled=not STATE.runner.is_running())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest.mock import patch
 
@@ -75,9 +76,28 @@ class V44UiTests(unittest.TestCase):
                 "lora-project-name",
                 "lora-goal",
                 "lora-base-model",
-                "lora-memory-profile",
+                "lora-preset",
             },
         )
+        self.assertEqual(self.widgets["lora-preset"].type, "select")
+        self.assertEqual(len(self.widgets["lora-preset"].options), 4)
+        self.assertTrue(
+            all(option.description for option in self.widgets["lora-preset"].options)
+        )
+        self.assertTrue(
+            all(option.description for option in self.widgets["lora-goal"].options)
+        )
+        self.assertIn("only need", self.widgets["lora-train-controls-help"].content.lower())
+        self.assertIn("Starter range", self.widgets["lora-tuning-table"].headers)
+        self.assertIn(
+            "underfitting",
+            self.widgets["cfg-lora-r"].options.description.lower(),
+        )
+        adapter_options = {
+            option.value: option.description
+            for option in self.widgets["cfg-adapter"].options
+        }
+        self.assertIn("gpu memory", adapter_options["qlora"].lower())
         data_form = self.widgets["lora-data-form"]
         self.assertEqual(data_form.action_id, "lora-data-save")
         self.assertEqual(
@@ -86,6 +106,17 @@ class V44UiTests(unittest.TestCase):
         )
         self.assertTrue(self.widgets["lora-data-editor"].options.multiline)
         self.assertEqual(self.widgets["lora-data-editor"].options.rows, 12)
+        example_form = self.widgets["lora-example-form"]
+        self.assertEqual(example_form.action_id, "lora-example-add")
+        self.assertEqual(
+            {child.id for child in example_form.children},
+            {
+                "lora-example-user",
+                "lora-example-answer",
+                "lora-example-system",
+            },
+        )
+        self.assertTrue(self.widgets["lora-data-editor-panel"].options.initial_collapsed)
 
         self.assertEqual(
             self.widgets["lora-training-log"].stream_id,
@@ -127,6 +158,53 @@ class V44UiTests(unittest.TestCase):
                 "helpful-captain",
             )
         )
+
+    def test_easy_example_builder_replaces_the_untouched_template_then_saves(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "lora-easy-example"
+        try:
+            clear_session_state(session_id)
+            get_session_state(session_id)["lora-data-editor"] = main.starter_dataset_template(
+                main.LORA_GOALS[0],
+                "Helpful Captain",
+            )
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                )
+            )
+            with (
+                patch.object(main, "_set_widget_value") as set_value,
+                patch.object(
+                    main,
+                    "_lora_save_dataset_action",
+                    return_value=True,
+                ) as save,
+                patch.object(main.lcars, "notify"),
+            ):
+                main._lora_add_example_action(
+                    project_name="helpful-captain",
+                    filename="helpful-captain.jsonl",
+                    user_prompt="What happens when a tool fails?",
+                    ideal_response="I inspect the error, explain it briefly, and retry safely.",
+                    system_prompt="Be calm.",
+                )
+
+            editor_text = set_value.call_args_list[0].args[1]
+            self.assertNotIn("EDIT ME", editor_text)
+            self.assertEqual(
+                [message["role"] for message in json.loads(editor_text)["messages"]],
+                ["system", "user", "assistant"],
+            )
+            save.assert_called_once_with(
+                "helpful-captain.jsonl",
+                editor_text,
+                notify=False,
+            )
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
 
     def test_manifest_uses_v44_capabilities(self) -> None:
         run = self.manifest.pages["run"]

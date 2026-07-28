@@ -8,8 +8,8 @@ It is built with the pinned v4.4.0 release of
 ## What It Manages
 
 - A beginner LoRA Studio for personality, agent-behavior, and hybrid projects, including guided
-  setup, local JSONL authoring/validation, focused training monitoring, adapter discovery, and
-  local Ollama comparison.
+  setup with hardware-aware smart presets and tuning guidance, local JSONL authoring/validation,
+  focused one-click training monitoring, adapter discovery, and local Ollama comparison.
 - Structured Axolotl YAML editing with a raw YAML escape hatch.
 - Smart setup recipes with visible Axolotl defaults versus UI starter suggestions.
 - Preflight validation for common expensive mistakes before a run starts.
@@ -36,12 +36,13 @@ It is built with the pinned v4.4.0 release of
 
 - **LoRA Studio**: four-step readiness overview plus plain-language boundaries for personality
   and agent LoRAs.
-- **1 · Setup**: project goal, base model, and LoRA/QLoRA memory profile translated into a safe
-  Axolotl starter config.
-- **2 · Data**: editable chat JSONL template, structural checks, draft placeholders, quality
-  guidance, and recoverable saves under `data/`.
-- **3 · Train**: beginner launch gate, short plan, live Axolotl/GPU/RAM monitor, training log,
-  controls, and detected adapter outputs.
+- **1 · Setup**: project goal, base model, and an outcome-based smart preset translated into a
+  safe Axolotl starter config, with inline option help and a current-value tuning guide.
+- **2 · Data**: a prompt/ideal-answer form that generates chat JSONL automatically, plus a
+  collapsible raw editor, structural checks, draft placeholders, quality guidance, and recoverable
+  saves under `data/`.
+- **3 · Train**: beginner launch gate, one-click checked start, short plan, live
+  Axolotl/GPU/RAM monitor, training log, optional diagnostics, and detected adapter outputs.
 - **4 · Test**: Ollama Modelfile creation plus held-out side-by-side base/adapter responses.
 - **Command**: readiness summary, preflight matrix, quick actions.
 - **Config**: config file management and structured coverage map.

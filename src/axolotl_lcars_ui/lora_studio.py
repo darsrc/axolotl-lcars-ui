@@ -8,7 +8,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 class LoraStudioError(RuntimeError):
@@ -25,6 +25,18 @@ LORA_MEMORY_PROFILES = (
     "Balanced LoRA · easiest Ollama path",
     "QLoRA · lowest VRAM",
 )
+
+LORA_GOAL_HINTS: Mapping[str, str] = {
+    "Personality / voice": (
+        "Teach tone, phrasing, boundaries, and a consistent conversational identity."
+    ),
+    "Agent behavior": (
+        "Teach planning, tool-use patterns, clarification, recovery, and concise progress reports."
+    ),
+    "Personality + agent": (
+        "Blend a recognizable voice with repeatable planning and tool-use behavior."
+    ),
+}
 
 LORA_BASE_MODELS: tuple[tuple[str, str], ...] = (
     (
@@ -45,6 +57,22 @@ LORA_BASE_MODELS: tuple[tuple[str, str], ...] = (
     ),
 )
 
+LORA_BASE_MODEL_HINTS: Mapping[str, str] = {
+    "unsloth/Llama-3.2-1B-Instruct": (
+        "Best first run: small, quick to iterate, and easy to package with a matching Llama base."
+    ),
+    "meta-llama/Llama-3.2-3B-Instruct": (
+        "A stronger small model. It needs more VRAM and may require Hugging Face access approval."
+    ),
+    "google/gemma-2-2b-it": (
+        "A compact non-Llama alternative with good instruction behavior; keep the exact Gemma "
+        "family when testing the adapter."
+    ),
+    "mistralai/Mistral-7B-Instruct-v0.3": (
+        "The largest guided choice. Prefer QLoRA unless the detected GPU has generous memory."
+    ),
+}
+
 OLLAMA_BASE_HINTS = {
     "unsloth/Llama-3.2-1B-Instruct": "llama3.2:1b",
     "NousResearch/Llama-3.2-1B": "llama3.2:1b",
@@ -57,6 +85,244 @@ OLLAMA_BASE_HINTS = {
 _PROJECT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 _DATASET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.jsonl$")
 _PLACEHOLDER_MARKERS = ("[edit me", "<edit me", "replace this", "todo:")
+
+
+@dataclass(frozen=True)
+class LoraPreset:
+    """One conservative, plain-language recipe for a common LoRA run."""
+
+    key: str
+    label: str
+    summary: str
+    best_for: str
+    hardware: str
+    speed: str
+    settings: Mapping[str, Any]
+
+    @property
+    def method(self) -> str:
+        return str(self.settings.get("adapter") or "lora").upper()
+
+
+LORA_PRESETS: tuple[LoraPreset, ...] = (
+    LoraPreset(
+        key="quick-check",
+        label="Quick check · fastest first run",
+        summary=(
+            "A short, low-capacity run that proves the model, data, and training pipeline work."
+        ),
+        best_for="New projects, format checks, and catching setup errors before a long run",
+        hardware="1–3B model on a modest GPU",
+        speed="Fastest · 1 epoch · 1K context",
+        settings={
+            "adapter": "lora",
+            "load_in_8bit": True,
+            "load_in_4bit": False,
+            "lora_r": 8,
+            "lora_alpha": 16,
+            "lora_dropout": 0.05,
+            "sequence_len": 1024,
+            "sample_packing": False,
+            "pad_to_sequence_len": False,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 4,
+            "num_epochs": 1,
+            "learning_rate": 0.0002,
+            "optimizer": "adamw_bnb_8bit",
+            "warmup_steps": 5,
+        },
+    ),
+    LoraPreset(
+        key="balanced",
+        label="Everyday chat · safe default",
+        summary=(
+            "The general-purpose starter for voice, assistant behavior, and small instruction sets."
+        ),
+        best_for="Most personality, assistant, support, and tool-behavior adapters",
+        hardware="1–3B model with roughly 10–24 GB VRAM",
+        speed="Balanced · 3 epochs · 2K context",
+        settings={
+            "adapter": "lora",
+            "load_in_8bit": True,
+            "load_in_4bit": False,
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.05,
+            "sequence_len": 2048,
+            "sample_packing": True,
+            "pad_to_sequence_len": True,
+            "micro_batch_size": 2,
+            "gradient_accumulation_steps": 4,
+            "num_epochs": 3,
+            "learning_rate": 0.0001,
+            "optimizer": "adamw_bnb_8bit",
+            "warmup_steps": 10,
+        },
+    ),
+    LoraPreset(
+        key="low-vram",
+        label="Low VRAM · 4-bit QLoRA",
+        summary=(
+            "Loads the base in 4-bit and trades some speed for the smallest practical GPU footprint."
+        ),
+        best_for="Laptop GPUs, larger base models, or an out-of-memory balanced run",
+        hardware="About 6–14 GB for common 1–8B models; model and context still matter",
+        speed="Memory saver · 3 epochs · 2K context",
+        settings={
+            "adapter": "qlora",
+            "load_in_8bit": False,
+            "load_in_4bit": True,
+            "lora_r": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.05,
+            "sequence_len": 2048,
+            "sample_packing": True,
+            "pad_to_sequence_len": True,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 8,
+            "num_epochs": 3,
+            "learning_rate": 0.0002,
+            "optimizer": "paged_adamw_8bit",
+            "warmup_steps": 10,
+        },
+    ),
+    LoraPreset(
+        key="high-detail",
+        label="High detail · more adapter capacity",
+        summary=(
+            "Uses a larger rank, longer context, and larger effective batch for nuanced behavior."
+        ),
+        best_for="Complex response formats or behavior that clearly underfits the balanced preset",
+        hardware="24+ GB for 1–3B models; substantially more for a 7B model",
+        speed="Slowest · 3 epochs · 4K context",
+        settings={
+            "adapter": "lora",
+            "load_in_8bit": True,
+            "load_in_4bit": False,
+            "lora_r": 32,
+            "lora_alpha": 64,
+            "lora_dropout": 0.05,
+            "sequence_len": 4096,
+            "sample_packing": True,
+            "pad_to_sequence_len": True,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 16,
+            "num_epochs": 3,
+            "learning_rate": 0.0001,
+            "optimizer": "adamw_bnb_8bit",
+            "warmup_steps": 10,
+        },
+    ),
+)
+
+LORA_PRESET_KEYS = tuple(preset.key for preset in LORA_PRESETS)
+DEFAULT_LORA_PRESET = "balanced"
+
+
+@dataclass(frozen=True)
+class LoraTuningHint:
+    """Beginner-readable guidance for one setting exposed by the presets."""
+
+    key: str
+    label: str
+    purpose: str
+    starter_range: str
+    tune_when: str
+    tradeoff: str
+
+    @property
+    def inline_hint(self) -> str:
+        return (
+            f"{self.purpose} Starter: {self.starter_range}. "
+            f"Tune when: {self.tune_when} Tradeoff: {self.tradeoff}"
+        )
+
+
+LORA_TUNING_HINTS: tuple[LoraTuningHint, ...] = (
+    LoraTuningHint(
+        "adapter",
+        "Method",
+        "LoRA is the straightforward path; QLoRA loads the base model in 4-bit to save VRAM.",
+        "LoRA first, QLoRA after an out-of-memory error",
+        "the selected model does not fit",
+        "QLoRA uses much less memory but can train more slowly and needs careful adapter export.",
+    ),
+    LoraTuningHint(
+        "lora_r",
+        "LoRA rank",
+        "Controls how much new behavior the adapter can represent.",
+        "8 for a test, 16 for most runs, 32 for proven underfitting",
+        "good data still produces responses that are too generic or misses a complex format",
+        "Higher rank increases trainable parameters, memory use, adapter size, and overfit risk.",
+    ),
+    LoraTuningHint(
+        "lora_alpha",
+        "LoRA alpha",
+        "Scales the adapter update relative to the base model.",
+        "Usually 2 × rank",
+        "you deliberately change rank",
+        "Changing alpha alone can make training too weak or too aggressive.",
+    ),
+    LoraTuningHint(
+        "lora_dropout",
+        "Dropout",
+        "Randomly hides a small share of adapter activations to reduce memorization.",
+        "0.0–0.1; 0.05 is a safe default",
+        "a small dataset copies training wording but fails held-out prompts",
+        "More dropout can improve generalization but can also cause underfitting.",
+    ),
+    LoraTuningHint(
+        "sequence_len",
+        "Context length",
+        "Sets the maximum token length of each prepared training sample.",
+        "1024 for quick tests, 2048 normally, 4096 only when examples need it",
+        "important examples are being truncated",
+        "Longer context can increase activation memory and training time sharply.",
+    ),
+    LoraTuningHint(
+        "micro_batch_size",
+        "Micro batch",
+        "Controls how many samples each GPU processes at once.",
+        "1–2",
+        "GPU memory is underused, or the run reports out of memory",
+        "Raise for throughput; lower first after an out-of-memory error.",
+    ),
+    LoraTuningHint(
+        "gradient_accumulation_steps",
+        "Gradient accumulation",
+        "Builds a larger effective batch without keeping every sample in VRAM at once.",
+        "4–16",
+        "you lower micro batch or loss is very noisy",
+        "Higher values stabilize updates but add time between optimizer steps.",
+    ),
+    LoraTuningHint(
+        "num_epochs",
+        "Epochs",
+        "Counts complete passes through the training dataset.",
+        "1 to prove the pipeline; 2–3 for a real first run",
+        "held-out behavior still underfits, or training wording is being memorized",
+        "More epochs can strengthen behavior but quickly overfit small datasets.",
+    ),
+    LoraTuningHint(
+        "learning_rate",
+        "Learning rate",
+        "Controls the size of each optimizer update.",
+        "0.0001–0.0003 for LoRA-style SFT",
+        "loss is flat after checking labels, or loss spikes and becomes unstable",
+        "Higher learns faster but can overshoot; lower is steadier but may underfit.",
+    ),
+    LoraTuningHint(
+        "sample_packing",
+        "Sample packing",
+        "Combines short examples into fuller sequences for better GPU utilization.",
+        "On for normal runs; off for the first debug run",
+        "you are diagnosing malformed samples or unexplained loss spikes",
+        "Packing is faster, while unpacked samples are easier to inspect.",
+    ),
+)
+
+_LORA_PRESETS_BY_KEY = {preset.key: preset for preset in LORA_PRESETS}
+_LORA_TUNING_HINTS_BY_KEY = {hint.key: hint for hint in LORA_TUNING_HINTS}
 
 
 @dataclass(frozen=True)
@@ -125,53 +391,108 @@ def beginner_config_updates(
     project_name: str,
     *,
     base_model: str,
-    memory_profile: str,
+    preset: str | None = None,
+    memory_profile: str | None = None,
 ) -> dict[str, Any]:
-    """Translate the short setup wizard into conservative Axolotl settings."""
+    """Translate the short setup wizard into a conservative Axolotl config."""
 
     slug = normalize_project_name(project_name)
-    if memory_profile not in LORA_MEMORY_PROFILES:
-        raise LoraStudioError("Choose one of the guided memory profiles.")
-    qlora = memory_profile == LORA_MEMORY_PROFILES[1]
-    return {
+    # Keep the original memory-profile API working for saved sessions and integrations.
+    if preset is None and memory_profile is not None:
+        if memory_profile not in LORA_MEMORY_PROFILES:
+            raise LoraStudioError("Choose one of the guided memory profiles.")
+        preset = "low-vram" if memory_profile == LORA_MEMORY_PROFILES[1] else "balanced"
+    selected = get_lora_preset(preset or DEFAULT_LORA_PRESET)
+    updates: dict[str, Any] = {
         "base_model": base_model.strip(),
         "model_type": "AutoModelForCausalLM",
         "tokenizer_type": "AutoTokenizer",
-        "adapter": "qlora" if qlora else "lora",
-        "load_in_8bit": not qlora,
-        "load_in_4bit": qlora,
-        "lora_r": 16,
-        "lora_alpha": 32,
-        "lora_dropout": 0.05,
         "datasets.0.path": f"./data/{slug}.jsonl",
         "datasets.0.type": "chat_template",
         "datasets.0.ds_type": "json",
         "datasets.0.field_messages": "messages",
         "datasets.0.chat_template": "tokenizer_default",
+        "datasets.0.roles_to_train": "assistant",
         "datasets.0.train_on_eos": "turn",
         "dataset_prepared_path": f"./prepared/{slug}",
         "val_set_size": 0.1,
-        "sequence_len": 2048,
-        "sample_packing": True,
-        "pad_to_sequence_len": True,
         "output_dir": f"./outputs/{slug}",
         "save_safetensors": True,
-        "micro_batch_size": 1 if qlora else 2,
-        "gradient_accumulation_steps": 8 if qlora else 4,
-        "num_epochs": 3,
-        "learning_rate": 0.0002 if qlora else 0.0001,
-        "optimizer": "paged_adamw_8bit" if qlora else "adamw_bnb_8bit",
+        "lora_target_linear": True,
+        "train_on_inputs": False,
+        "max_steps": None,
+        "batch_size": None,
         "lr_scheduler": "cosine",
-        "warmup_steps": 10,
+        "warmup_ratio": None,
+        "weight_decay": 0.01,
         "bf16": "auto",
         "fp16": False,
         "gradient_checkpointing": "true",
         "attn_implementation": "sdpa",
         "logging_steps": 1,
         "save_steps": 100,
+        "save_strategy": "epoch",
+        "save_total_limit": 2,
         "eval_steps": 100,
+        "eval_strategy": "epoch",
         "strict": False,
     }
+    updates.update(selected.settings)
+    return updates
+
+
+def get_lora_preset(key: str) -> LoraPreset:
+    """Return a preset by stable key with a beginner-readable error."""
+
+    try:
+        return _LORA_PRESETS_BY_KEY[key]
+    except KeyError as exc:
+        raise LoraStudioError("Choose one of the guided smart presets.") from exc
+
+
+def infer_lora_preset(cfg: Mapping[str, Any]) -> str:
+    """Infer the closest smart preset from an existing Axolotl config."""
+
+    if str(cfg.get("adapter") or "").lower() == "qlora" or bool(cfg.get("load_in_4bit")):
+        return "low-vram"
+    try:
+        rank = int(cfg.get("lora_r") or 0)
+        context = int(cfg.get("sequence_len") or 0)
+        epochs = float(cfg.get("num_epochs") or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_LORA_PRESET
+    if epochs and epochs <= 1 and rank <= 8 and context <= 1024:
+        return "quick-check"
+    if rank >= 32 or context >= 4096:
+        return "high-detail"
+    return DEFAULT_LORA_PRESET
+
+
+def recommend_lora_preset(
+    gpu_vram_gb: float | None,
+    base_model: str,
+) -> str:
+    """Recommend a recipe from detected VRAM and the selected model size."""
+
+    model_size = _model_size_billions(base_model)
+    if gpu_vram_gb is None or gpu_vram_gb <= 0:
+        return DEFAULT_LORA_PRESET
+    if model_size >= 6:
+        if gpu_vram_gb < 24:
+            return "low-vram"
+        return "high-detail" if gpu_vram_gb >= 48 else DEFAULT_LORA_PRESET
+    if gpu_vram_gb < 10:
+        return "low-vram"
+    if gpu_vram_gb >= 24:
+        return "high-detail"
+    return DEFAULT_LORA_PRESET
+
+
+def lora_tuning_hint(key: str) -> str:
+    """Return concise inline help for a common LoRA field."""
+
+    hint = _LORA_TUNING_HINTS_BY_KEY.get(key)
+    return hint.inline_hint if hint is not None else ""
 
 
 def starter_dataset_template(goal: str, assistant_name: str) -> str:
@@ -228,6 +549,33 @@ def starter_dataset_template(goal: str, assistant_name: str) -> str:
             }
         )
     return "\n".join(json.dumps(record, ensure_ascii=False) for record in records)
+
+
+def chat_example_line(
+    user_prompt: str,
+    ideal_response: str,
+    *,
+    system_prompt: str = "",
+) -> str:
+    """Build one OpenAI-messages JSONL line from a beginner form."""
+
+    user = user_prompt.strip()
+    assistant = ideal_response.strip()
+    system = system_prompt.strip()
+    if not user:
+        raise LoraStudioError("Write what the user says in this example.")
+    if not assistant:
+        raise LoraStudioError("Write the exact ideal answer the model should learn.")
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.extend(
+        (
+            {"role": "user", "content": user},
+            {"role": "assistant", "content": assistant},
+        )
+    )
+    return json.dumps({"messages": messages}, ensure_ascii=False)
 
 
 def inspect_configured_dataset(project_root: Path, cfg: dict[str, Any]) -> DatasetReport:
@@ -590,6 +938,21 @@ def _looks_local_dataset(value: str) -> bool:
     )
 
 
+def _model_size_billions(model_name: str) -> float:
+    """Best-effort parameter count from common Hugging Face model-id tokens."""
+
+    matches = re.findall(
+        r"(?:^|[-_/])(\d+(?:\.\d+)?)b(?:$|[-_/])",
+        model_name.lower(),
+    )
+    if not matches:
+        return 0.0
+    try:
+        return float(matches[-1])
+    except ValueError:
+        return 0.0
+
+
 def _resolve_project_path(project_root: Path, value: str) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -606,16 +969,29 @@ def _safe_stat(path: Path) -> Any | None:
 
 __all__ = [
     "AdapterArtifact",
+    "DEFAULT_LORA_PRESET",
     "DatasetReport",
     "LORA_BASE_MODELS",
+    "LORA_BASE_MODEL_HINTS",
     "LORA_GOALS",
+    "LORA_GOAL_HINTS",
     "LORA_MEMORY_PROFILES",
+    "LORA_PRESETS",
+    "LORA_PRESET_KEYS",
+    "LORA_TUNING_HINTS",
+    "LoraPreset",
     "LoraStudioError",
+    "LoraTuningHint",
     "beginner_config_updates",
+    "chat_example_line",
     "discover_adapter_artifacts",
+    "get_lora_preset",
+    "infer_lora_preset",
     "inspect_configured_dataset",
     "inspect_jsonl_text",
+    "lora_tuning_hint",
     "normalize_project_name",
+    "recommend_lora_preset",
     "save_chat_jsonl",
     "starter_dataset_template",
     "suggested_ollama_model",

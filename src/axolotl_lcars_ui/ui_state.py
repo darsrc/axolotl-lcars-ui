@@ -30,7 +30,7 @@ PERSISTED_WIDGET_IDS = frozenset(
         "lora-project-name",
         "lora-goal",
         "lora-base-model",
-        "lora-memory-profile",
+        "lora-preset",
         "lora-data-filename",
         "lora-test-base-model",
         "lora-test-adapter-path",
