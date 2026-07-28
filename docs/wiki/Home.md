@@ -8,8 +8,9 @@ It is built with the pinned v4.4.0 release of
 ## What It Manages
 
 - A beginner LoRA Studio for personality, agent-behavior, and hybrid projects, including guided
-  setup with hardware-aware smart presets and tuning guidance, local JSONL authoring/validation,
-  focused one-click training monitoring, adapter discovery, and local Ollama comparison.
+  setup with hardware-aware smart presets, architecture-aware Qwen 3.5/3.6 and Gemma 4 templates,
+  and tuning guidance, local JSONL authoring/validation, focused one-click training monitoring,
+  adapter discovery, and local Ollama comparison.
 - Structured Axolotl YAML editing with a raw YAML escape hatch.
 - Smart setup recipes with visible Axolotl defaults versus UI starter suggestions.
 - Preflight validation for common expensive mistakes before a run starts.
@@ -37,7 +38,8 @@ It is built with the pinned v4.4.0 release of
 - **LoRA Studio**: four-step readiness overview plus plain-language boundaries for personality
   and agent LoRAs.
 - **1 · Setup**: project goal, base model, and an outcome-based smart preset translated into a
-  safe Axolotl starter config, with inline option help and a current-value tuning guide.
+  safe Axolotl starter config. Official templates cover Qwen 3.5 2B/4B/9B, Qwen 3.6
+  27B/35B-A3B, and Gemma 4 E2B/E4B, with inline option help and a current-value tuning guide.
 - **2 · Data**: a prompt/ideal-answer form that generates chat JSONL automatically, plus a
   collapsible raw editor, structural checks, draft placeholders, quality guidance, and recoverable
   saves under `data/`.

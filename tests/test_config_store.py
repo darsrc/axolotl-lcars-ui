@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigStore
+from axolotl_lcars_ui.lora_studio import beginner_config_updates
 
 
 def _spec(key: str):
@@ -66,6 +67,54 @@ class ConfigControlValueTests(unittest.TestCase):
                 store.control_value(_spec("dataset_processes"), cfg),
                 "",
             )
+
+    def test_switching_model_templates_clears_stale_architecture_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ConfigStore(Path(temp_dir))
+
+            store.apply_updates(
+                beginner_config_updates(
+                    "switchable",
+                    base_model="google/gemma-4-E2B-it",
+                    preset="balanced",
+                )
+            )
+            gemma = store.load()
+            self.assertNotIn("model_type", gemma)
+            self.assertNotIn("tokenizer_type", gemma)
+            self.assertEqual(gemma["chat_template"], "gemma4")
+            self.assertEqual(gemma["eot_tokens"], ["<turn|>"])
+            self.assertIsInstance(gemma["lora_target_modules"], str)
+            self.assertNotIn("chat_template", gemma["datasets"][0])
+
+            store.apply_updates(
+                beginner_config_updates(
+                    "switchable",
+                    base_model="Qwen/Qwen3.5-4B",
+                    preset="balanced",
+                )
+            )
+            qwen = store.load()
+            self.assertEqual(qwen["chat_template"], "qwen3_5")
+            self.assertNotIn("eot_tokens", qwen)
+            self.assertIsInstance(qwen["lora_target_modules"], list)
+            self.assertIn("linear_attn.in_proj_z", qwen["lora_target_modules"])
+
+            store.apply_updates(
+                beginner_config_updates(
+                    "switchable",
+                    base_model="unsloth/Llama-3.2-1B-Instruct",
+                    preset="balanced",
+                )
+            )
+            legacy = store.load()
+            self.assertEqual(legacy["model_type"], "AutoModelForCausalLM")
+            self.assertEqual(legacy["tokenizer_type"], "AutoTokenizer")
+            self.assertNotIn("chat_template", legacy)
+            self.assertNotIn("eot_tokens", legacy)
+            self.assertNotIn("lora_target_modules", legacy)
+            self.assertTrue(legacy["lora_target_linear"])
+            self.assertEqual(legacy["datasets"][0]["chat_template"], "tokenizer_default")
 
 
 if __name__ == "__main__":

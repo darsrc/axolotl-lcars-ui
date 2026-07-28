@@ -102,6 +102,8 @@ ATTENTION_IMPL_OPTIONS = (
 CHAT_TEMPLATE_OPTIONS = (
     "",
     "tokenizer_default",
+    "qwen3_5",
+    "gemma4",
     "alpaca",
     "inst",
     "chatml",
@@ -879,6 +881,9 @@ class ConfigStore:
         cfg = self.load()
         specs_by_key = {spec.key: spec for spec in FIELD_SPECS}
         for key, value in updates.items():
+            if value is None:
+                self._delete_path(cfg, key)
+                continue
             spec = specs_by_key.get(key)
             if spec is None:
                 self._set_path(cfg, key, value, optional=value in (None, ""))
@@ -997,9 +1002,18 @@ class ConfigStore:
                 return int(number)
             return number
         if spec.kind == "csv_list":
+            if isinstance(value, (list, tuple)):
+                parts = [str(part).strip() for part in value if str(part).strip()]
+                return parts or None
             text = "" if value is None else str(value).strip()
             if not text:
                 return None
+            if spec.key == "lora_target_modules" and any(
+                marker in text for marker in ("[", "]", "(", ")", "|", "^", "$")
+            ):
+                # Axolotl accepts a single regex string here. Splitting it into a
+                # one-item list changes PEFT's matching semantics.
+                return text
             parts = [part.strip() for part in text.split(",") if part.strip()]
             if spec.key == "optim_target_modules" and parts == ["all_linear"]:
                 return "all_linear"

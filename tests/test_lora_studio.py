@@ -9,12 +9,14 @@ from axolotl_lcars_ui.lora_studio import (
     DEFAULT_LORA_PRESET,
     LORA_GOALS,
     LORA_MEMORY_PROFILES,
+    LORA_MODEL_TEMPLATES,
     LORA_PRESETS,
     LORA_TUNING_HINTS,
     LoraStudioError,
     beginner_config_updates,
     chat_example_line,
     discover_adapter_artifacts,
+    get_lora_model_template,
     infer_lora_preset,
     inspect_configured_dataset,
     inspect_jsonl_text,
@@ -109,6 +111,71 @@ class LoraStudioTests(unittest.TestCase):
             "quick-check",
         )
         self.assertGreaterEqual(len(LORA_TUNING_HINTS), 8)
+
+    def test_requested_qwen_and_gemma_templates_use_official_checkpoint_ids(self) -> None:
+        expected = {
+            "Qwen/Qwen3.5-2B",
+            "Qwen/Qwen3.5-4B",
+            "Qwen/Qwen3.5-9B",
+            "Qwen/Qwen3.6-27B",
+            "Qwen/Qwen3.6-35B-A3B",
+            "google/gemma-4-E2B-it",
+            "google/gemma-4-E4B-it",
+        }
+
+        self.assertEqual({template.model_id for template in LORA_MODEL_TEMPLATES}, expected)
+        self.assertEqual(len(LORA_MODEL_TEMPLATES), 7)
+        self.assertEqual(
+            get_lora_model_template(" qwen/qwen3.6-35b-a3b ").architecture,
+            "35B total / 3B active MoE",
+        )
+
+    def test_model_templates_apply_architecture_specific_text_lora_defaults(self) -> None:
+        for template in LORA_MODEL_TEMPLATES:
+            with self.subTest(model=template.model_id):
+                updates = beginner_config_updates(
+                    "model-template",
+                    base_model=template.model_id,
+                    preset=template.default_preset,
+                )
+                self.assertIsNone(updates["model_type"])
+                self.assertIsNone(updates["tokenizer_type"])
+                self.assertIsNone(updates["datasets.0.chat_template"])
+                self.assertFalse(updates["lora_target_linear"])
+                self.assertFalse(updates["pad_to_sequence_len"])
+                self.assertEqual(
+                    updates["gradient_checkpointing_kwargs"],
+                    {"use_reentrant": False},
+                )
+
+                if template.family == "Gemma 4":
+                    self.assertEqual(updates["chat_template"], "gemma4")
+                    self.assertEqual(updates["eot_tokens"], ("<turn|>",))
+                    self.assertIsInstance(updates["lora_target_modules"], str)
+                    self.assertIn("model.language_model.layers", updates["lora_target_modules"])
+                else:
+                    self.assertEqual(updates["chat_template"], "qwen3_5")
+                    self.assertFalse(updates["sample_packing"])
+                    self.assertIn(
+                        "linear_attn.in_proj_qkv",
+                        updates["lora_target_modules"],
+                    )
+
+        moe = beginner_config_updates(
+            "moe-template",
+            base_model="Qwen/Qwen3.6-35B-A3B",
+            preset="low-vram",
+        )
+        self.assertTrue(moe["quantize_moe_experts"])
+        self.assertNotIn("gate_up_proj", moe["lora_target_modules"])
+
+    def test_each_known_model_recommends_its_safe_default_without_gpu_data(self) -> None:
+        for template in LORA_MODEL_TEMPLATES:
+            with self.subTest(model=template.model_id):
+                self.assertEqual(
+                    recommend_lora_preset(None, template.model_id),
+                    template.default_preset,
+                )
 
     def test_starter_template_is_valid_jsonl_but_remains_an_explicit_draft(self) -> None:
         text = starter_dataset_template(LORA_GOALS[1], "Pathfinder")

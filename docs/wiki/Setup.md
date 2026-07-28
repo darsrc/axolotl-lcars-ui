@@ -63,7 +63,18 @@ The first five navigation items form one guided workflow:
 2. **1 · Setup** asks only for a project name, goal, base model, and plain-language smart preset.
    It detects GPU VRAM, marks the best starting recipe, and fills the related adapter, rank,
    context, batch, optimizer, dataset, output, and safety fields. Presets cover a quick pipeline
-   check, everyday chat, low-VRAM QLoRA, and higher-capacity behavior training.
+   check, everyday chat, low-VRAM QLoRA, and higher-capacity behavior training. Choosing a known
+   model also applies its architecture-specific chat format and LoRA targets:
+
+   - Qwen 3.5 2B, 4B, and 9B
+   - Qwen 3.6 27B and 35B-A3B (35B total parameters, 3B active)
+   - Gemma 4 E2B and E4B instruction-tuned checkpoints
+
+   These guided recipes train text/chat behavior and avoid the media encoder. Qwen hybrid-attention
+   templates start with packing disabled so the optional FLA package is not required for the first
+   run. Gemma 4 uses a language-backbone regex because Axolotl does not support its generic
+   `lora_target_linear` switch for multimodal models. Use Axolotl 0.16.0 or newer for Qwen 3.5/3.6
+   and 0.16.1 or newer for Gemma 4.
 3. **2 · Data** lets you enter a user prompt and exact ideal answer in a normal form; **Add &
    Save** generates the chat JSONL automatically. The first form entry replaces the untouched
    `EDIT ME` starter template and later entries append safely. A collapsible raw editor remains

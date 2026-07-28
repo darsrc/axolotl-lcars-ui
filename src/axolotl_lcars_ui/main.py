@@ -16,7 +16,7 @@ from typing import Any, Callable
 import lcars_ui as lcars
 import uvicorn
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.datastructures import State
 
 from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigError, ConfigStore, FieldSpec
@@ -30,6 +30,7 @@ from axolotl_lcars_ui.lora_studio import (
     LORA_BASE_MODEL_HINTS,
     LORA_GOALS,
     LORA_GOAL_HINTS,
+    LORA_MODEL_TEMPLATES,
     LORA_PRESETS,
     LORA_PRESET_KEYS,
     LORA_TUNING_HINTS,
@@ -38,6 +39,7 @@ from axolotl_lcars_ui.lora_studio import (
     beginner_config_updates,
     chat_example_line,
     discover_adapter_artifacts,
+    get_lora_model_template,
     get_lora_preset,
     infer_lora_preset,
     inspect_configured_dataset,
@@ -72,6 +74,7 @@ from lcars_ui.dsl.api import _index_form_children
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+INTERNAL_NAVIGATION_SCRIPT = Path(__file__).with_name("static") / "internal_navigation.js"
 LOG_AXOLOTL = "axolotl-run-log"
 LOG_HF = "hf-log"
 LOG_OLLAMA = "ollama-test-log"
@@ -265,6 +268,15 @@ CONFIG_VALUE_HINTS: dict[str, dict[str, str]] = {
         "epoch": "Evaluate after each full dataset pass; simple for small LoRA runs.",
         "steps": "Evaluate on a fixed step cadence for long runs.",
     },
+    "chat_template": {
+        "qwen3_5": (
+            "Axolotl's Qwen 3.5/3.6 role and control-token template. Required by the guided "
+            "Qwen model templates."
+        ),
+        "gemma4": (
+            "Axolotl's Gemma 4 conversation format, including Gemma 4 turn boundaries."
+        ),
+    },
 }
 
 CONFIG_FIELD_HINTS: dict[str, str] = {
@@ -296,6 +308,18 @@ CONFIG_FIELD_HINTS: dict[str, str] = {
         "Controls which end-of-sequence tokens are learned. turn matches each trainable assistant "
         "turn in the guided chat format."
     ),
+    "processor_type": (
+        "Loads a multimodal processor for image/audio/video datasets. The Studio's default "
+        "conversation builder is text-only, so known Qwen/Gemma text templates leave this unset."
+    ),
+    "chat_template": (
+        "Top-level architecture-aware message formatter. Qwen 3.5 and 3.6 use qwen3_5; "
+        "Gemma 4 uses gemma4."
+    ),
+    "eot_tokens": (
+        "Extra end-of-turn tokens Axolotl should recognize. Gemma 4 needs <turn|> so assistant "
+        "turn boundaries are trained correctly."
+    ),
     "val_set_size": (
         "Fraction held out for validation during training. Around 0.05–0.1 is useful once the "
         "dataset is large enough; keep separate held-out prompts for the final test too."
@@ -306,7 +330,20 @@ CONFIG_FIELD_HINTS: dict[str, str] = {
     ),
     "lora_target_linear": (
         "Applies LoRA to the model's linear layers without architecture-specific module names. "
-        "This is the portable guided default."
+        "This is the portable guided default, but multimodal Qwen 3.5/3.6 and Gemma 4 templates "
+        "replace it with explicit text-backbone targets."
+    ),
+    "lora_target_modules": (
+        "The exact model modules that receive adapter weights. Qwen hybrid models include both "
+        "normal and Gated DeltaNet projections; Gemma 4 uses a regex to avoid its media encoders."
+    ),
+    "lora_target_parameters": (
+        "Targets raw parameter tensors such as routed MoE experts. The Qwen A3B beginner template "
+        "leaves these frozen; add expert targets only when you intentionally need expert LoRA."
+    ),
+    "quantize_moe_experts": (
+        "Quantizes frozen routed experts in a QLoRA MoE run. It reduces memory for Qwen A3B but "
+        "must not be paired with the generic lora_target_linear switch."
     ),
     "load_in_8bit": (
         "Loads base weights in 8-bit for a standard guided LoRA run. Disable it when QLoRA's "
@@ -943,15 +980,15 @@ def _lora_setup_page() -> None:
                     ),
                 )
                 base_model = lcars.select(
-                    "Base Model",
+                    "Base Model Template",
                     base_options,
                     value=current_base,
                     id="lora-base-model",
                     settings=lcars.ChoiceOptions(
                         searchable=True,
                         description=(
-                            "The adapter only works with this model lineage. The 1B starter is "
-                            "the easiest way to prove the workflow."
+                            "Known Qwen 3.5/3.6 and Gemma 4 choices also apply their required chat "
+                            "format and safe text-backbone LoRA targets automatically."
                         ),
                     ),
                 )
@@ -987,6 +1024,23 @@ def _lora_setup_page() -> None:
                     wrap="wrap",
                 ),
             )
+            chosen_model_template = get_lora_model_template(str(base_model))
+            if chosen_model_template is not None:
+                lcars.text(
+                    (
+                        f"Model template: {chosen_model_template.family} · "
+                        f"{chosen_model_template.architecture}. "
+                        f"{chosen_model_template.summary}"
+                    ),
+                    id="lora-setup-model-summary",
+                    options=lcars.TextOptions(
+                        description=(
+                            f"Training scope: text/chat adapter. "
+                            f"Minimum supported Axolotl: {chosen_model_template.min_axolotl}."
+                        ),
+                        wrap="wrap",
+                    ),
+                )
 
         with lcars.data_panel(
             "Active Project At A Glance",
@@ -1012,6 +1066,31 @@ def _lora_setup_page() -> None:
                 "[Open every Axolotl field](?page=config)",
                 id="lora-setup-links",
                 options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+        with lcars.data_panel(
+            "Qwen 3.5 / 3.6 + Gemma 4 Model Templates",
+            color="lilac",
+            id="lora-model-template-panel",
+            zone="full",
+            span=(4, 3),
+            weight=12,
+            aspect="wide",
+            group="lora-model-templates",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "These are **text/chat LoRA defaults** for the official post-trained checkpoints. "
+                "They deliberately avoid training vision/audio encoders. Choosing one in the form "
+                "applies its Axolotl chat template, turn tokens, target modules, and MoE guardrails.",
+                id="lora-model-template-help",
+            )
+            _enhanced_table(
+                _lora_model_template_rows(),
+                title="Architecture-Aware Defaults",
+                id="lora-model-template-table",
+                filter_columns={"Family", "Model", "First recipe"},
+                copy_columns={"Model"},
             )
 
         with lcars.data_panel(
@@ -3800,6 +3879,25 @@ def _lora_preset_rows(recommended_key: str) -> list[dict[str, str]]:
     ]
 
 
+def _lora_model_template_rows() -> list[dict[str, str]]:
+    return [
+        {
+            "Family": template.family,
+            "Model": template.model_id,
+            "Architecture": template.architecture,
+            "First recipe": get_lora_preset(template.default_preset).label,
+            "Adapter scope": (
+                "Attention + shared text paths; routed experts frozen"
+                if template.moe
+                else "Text decoder only"
+            ),
+            "Hardware": template.hardware,
+            "Requires": f"Axolotl {template.min_axolotl}+",
+        }
+        for template in LORA_MODEL_TEMPLATES
+    ]
+
+
 def _lora_tuning_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {
@@ -3891,7 +3989,8 @@ def _lora_training_plan_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
         if cfg.get("load_in_4bit")
         else ("8-bit base (LoRA)" if cfg.get("load_in_8bit") else "full-precision base")
     )
-    return [
+    model_template = get_lora_model_template(str(cfg.get("base_model") or ""))
+    rows = [
         {
             "Choice": "Smart preset",
             "Value": get_lora_preset(infer_lora_preset(cfg)).label,
@@ -3938,6 +4037,16 @@ def _lora_training_plan_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
             "Why": "Where checkpoints and the final adapter are written",
         },
     ]
+    if model_template is not None:
+        rows.insert(
+            2,
+            {
+                "Choice": "Architecture template",
+                "Value": f"{model_template.family} · {model_template.architecture}",
+                "Why": "Sets the correct chat format and text-only LoRA targets",
+            },
+        )
+    return rows
 
 
 def _lora_training_brief_rows(
@@ -4691,6 +4800,19 @@ def _lora_setup_action(
             raise LoraStudioError("Choose a guided LoRA goal.")
         if not base_model.strip():
             raise LoraStudioError("Choose a base model.")
+        current_cfg = STATE.config_store.load()
+        current_base_model = str(current_cfg.get("base_model") or "").strip()
+        effective_preset_key = preset_key
+        if (
+            base_model.strip() != current_base_model
+            and preset_key == infer_lora_preset(current_cfg)
+        ):
+            # A model change should inherit that model's safe default unless the
+            # operator also made an explicit recipe change in the same form.
+            effective_preset_key = recommend_lora_preset(
+                _detected_gpu_vram_gb(),
+                base_model,
+            )
         config_name = (
             STATE.config_store.active_name
             if Path(STATE.config_store.active_name).stem == slug
@@ -4709,13 +4831,13 @@ def _lora_setup_action(
             beginner_config_updates(
                 slug,
                 base_model=base_model,
-                preset=preset_key,
+                preset=effective_preset_key,
             )
         )
         _set_widget_value("lora-project-name", slug)
         _set_session_value("lora-goal", goal)
         _set_session_value("lora-base-model", base_model)
-        _set_session_value("lora-preset", preset_key)
+        _set_session_value("lora-preset", effective_preset_key)
         _set_widget_value("lora-data-filename", f"{slug}.jsonl")
         _set_widget_value("lora-test-model-name", f"{slug}-lora")
         current_editor = _widget_value("lora-data-editor")
@@ -4731,8 +4853,14 @@ def _lora_setup_action(
         issues = STATE.refresh_preflight()
         _update_preflight_widgets(issues)
         _update_lora_widgets()
+        model_template = get_lora_model_template(base_model)
+        template_text = (
+            f"{model_template.family} architecture defaults + "
+            if model_template is not None
+            else ""
+        )
         lcars.notify(
-            f"{get_lora_preset(preset_key).label} project {slug} saved. "
+            f"{template_text}{get_lora_preset(effective_preset_key).label} project {slug} saved. "
             "Next, replace the EDIT ME examples on the Data page."
         )
     except Exception as exc:
@@ -4748,6 +4876,9 @@ def _lora_save_dataset_action(
     if _workflow_blocks_config_change():
         return False
     try:
+        model_template = get_lora_model_template(
+            str(_load_config_or_empty().get("base_model") or "")
+        )
         target, draft_report = save_chat_jsonl(
             PROJECT_ROOT,
             filename.strip(),
@@ -4759,7 +4890,10 @@ def _lora_save_dataset_action(
                 "datasets.0.type": "chat_template",
                 "datasets.0.ds_type": "json",
                 "datasets.0.field_messages": "messages",
-                "datasets.0.chat_template": "tokenizer_default",
+                # Known model templates own message formatting at the top level.
+                "datasets.0.chat_template": (
+                    None if model_template is not None else "tokenizer_default"
+                ),
                 "datasets.0.roles_to_train": "assistant",
                 "datasets.0.train_on_eos": "turn",
             }
@@ -5816,6 +5950,7 @@ def create_lcars_app(
     form_children_by_action = _index_form_children(manifest)
 
     app = create_app(manifest=manifest)
+    _install_internal_navigation(app)
     _install_manifest_refresh(app, ui_fn, build_ctx.config)
     event_bus = app.state.event_bus
 
@@ -5916,6 +6051,47 @@ def _install_manifest_refresh(app: FastAPI, ui_fn: Callable[[], None], config: A
     app.state = _LiveManifestState(app.state._state)
     app.state._manifest_rebuild = lambda: _build_manifest(ui_fn, config)
     app.state._manifest_stale = False
+
+
+def _install_internal_navigation(app: FastAPI) -> None:
+    """Turn same-app ``?page=...`` links into client-side LCARS tab changes."""
+
+    root_index = next(
+        (
+            index
+            for index, route in enumerate(app.router.routes)
+            if getattr(route, "path", "") == "/"
+            and "GET" in (getattr(route, "methods", set()) or set())
+        ),
+        None,
+    )
+    if root_index is None:
+        return
+
+    original_route = app.router.routes.pop(root_index)
+    original_root = original_route.endpoint
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def root_with_internal_navigation() -> Any:
+        page = original_root()
+        if not isinstance(page, str) or "</body>" not in page:
+            return page
+        script = (
+            '<script type="module" src="/lcars/internal-navigation.js"></script>'
+        )
+        return page.replace("</body>", f"{script}\n</body>", 1)
+
+    enhanced_root = app.router.routes.pop()
+    app.router.routes.insert(root_index, enhanced_root)
+
+    @app.get("/lcars/internal-navigation.js", include_in_schema=False)
+    def internal_navigation_script() -> FileResponse:
+        return FileResponse(
+            INTERNAL_NAVIGATION_SCRIPT,
+            media_type="text/javascript",
+        )
+
+    _move_last_route_before_spa(app)
 
 
 def _mark_manifest_stale(app: FastAPI) -> None:

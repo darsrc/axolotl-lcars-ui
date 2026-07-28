@@ -38,7 +38,205 @@ LORA_GOAL_HINTS: Mapping[str, str] = {
     ),
 }
 
+
+@dataclass(frozen=True)
+class LoraModelTemplate:
+    """Architecture-aware defaults for one supported chat-model checkpoint."""
+
+    key: str
+    label: str
+    model_id: str
+    family: str
+    architecture: str
+    summary: str
+    hardware: str
+    default_preset: str
+    parameter_billions: float
+    qlora_below_vram_gb: float
+    high_detail_vram_gb: float
+    min_axolotl: str
+    settings: Mapping[str, Any]
+    moe: bool = False
+
+
+_QWEN_TEXT_LORA_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "down_proj",
+    "up_proj",
+    "linear_attn.in_proj_qkv",
+    "linear_attn.in_proj_z",
+    "linear_attn.out_proj",
+)
+
+_QWEN_TEXT_TEMPLATE_SETTINGS: Mapping[str, Any] = {
+    # Axolotl selects the Qwen conditional-generation class from the model config.
+    "model_type": None,
+    "tokenizer_type": None,
+    "datasets.0.chat_template": None,
+    "chat_template": "qwen3_5",
+    "lora_target_linear": False,
+    "lora_target_modules": _QWEN_TEXT_LORA_TARGETS,
+    # Packed Qwen hybrid-attention training requires the optional FLA install.
+    # The guided default favors a first run that works without that extra dependency.
+    "sample_packing": False,
+    "pad_to_sequence_len": False,
+    "gradient_checkpointing_kwargs": {"use_reentrant": False},
+}
+
+_GEMMA4_TEXT_TARGET_REGEX = (
+    r"model.language_model.layers.[\d]+.(_checkpoint_wrapped_module.)?"
+    r"(mlp|self_attn).(up|down|gate|q|k|v|o)_proj"
+)
+
+_GEMMA4_TEXT_TEMPLATE_SETTINGS: Mapping[str, Any] = {
+    # Gemma 4 is multimodal even for a text-only Studio dataset. Restrict the
+    # adapter to its language backbone instead of targeting every linear layer.
+    "model_type": None,
+    "tokenizer_type": None,
+    "datasets.0.chat_template": None,
+    "chat_template": "gemma4",
+    "eot_tokens": ("<turn|>",),
+    "lora_target_linear": False,
+    "lora_target_modules": _GEMMA4_TEXT_TARGET_REGEX,
+    "pad_to_sequence_len": False,
+    "gradient_checkpointing_kwargs": {"use_reentrant": False},
+    "lora_dropout": 0.0,
+}
+
+LORA_MODEL_TEMPLATES: tuple[LoraModelTemplate, ...] = (
+    LoraModelTemplate(
+        key="qwen35-2b",
+        label="Qwen 3.5 2B · smallest Qwen",
+        model_id="Qwen/Qwen3.5-2B",
+        family="Qwen 3.5",
+        architecture="2B dense hybrid",
+        summary=(
+            "Best Qwen starter for prototypes and narrow behavior adapters. "
+            "The template trains text/chat behavior and leaves multimodal components untouched."
+        ),
+        hardware="Balanced LoRA on a modest GPU; QLoRA when memory is tight",
+        default_preset="balanced",
+        parameter_billions=2.0,
+        qlora_below_vram_gb=10,
+        high_detail_vram_gb=24,
+        min_axolotl="0.16.0",
+        settings=_QWEN_TEXT_TEMPLATE_SETTINGS,
+    ),
+    LoraModelTemplate(
+        key="qwen35-4b",
+        label="Qwen 3.5 4B · everyday Qwen",
+        model_id="Qwen/Qwen3.5-4B",
+        family="Qwen 3.5",
+        architecture="4B dense hybrid",
+        summary=(
+            "A practical quality/size balance for personality, support, coding, and agent behavior."
+        ),
+        hardware="Balanced LoRA with comfortable memory; QLoRA on smaller GPUs",
+        default_preset="balanced",
+        parameter_billions=4.0,
+        qlora_below_vram_gb=14,
+        high_detail_vram_gb=32,
+        min_axolotl="0.16.0",
+        settings=_QWEN_TEXT_TEMPLATE_SETTINGS,
+    ),
+    LoraModelTemplate(
+        key="qwen35-9b",
+        label="Qwen 3.5 9B · stronger Qwen",
+        model_id="Qwen/Qwen3.5-9B",
+        family="Qwen 3.5",
+        architecture="9B dense hybrid",
+        summary=(
+            "The strongest requested Qwen 3.5 dense option. Start in QLoRA mode unless the GPU "
+            "has ample headroom."
+        ),
+        hardware="QLoRA is the conservative default; standard LoRA needs substantially more VRAM",
+        default_preset="low-vram",
+        parameter_billions=9.0,
+        qlora_below_vram_gb=32,
+        high_detail_vram_gb=64,
+        min_axolotl="0.16.0",
+        settings=_QWEN_TEXT_TEMPLATE_SETTINGS,
+    ),
+    LoraModelTemplate(
+        key="qwen36-27b",
+        label="Qwen 3.6 27B · dense flagship",
+        model_id="Qwen/Qwen3.6-27B",
+        family="Qwen 3.6",
+        architecture="27B dense hybrid",
+        summary=(
+            "A large dense coding/agent model. The guided default is QLoRA with a micro batch of "
+            "one; multi-GPU or high-memory hardware is still expected."
+        ),
+        hardware="High-memory workstation/server; begin with QLoRA",
+        default_preset="low-vram",
+        parameter_billions=27.0,
+        qlora_below_vram_gb=80,
+        high_detail_vram_gb=120,
+        min_axolotl="0.16.0",
+        settings=_QWEN_TEXT_TEMPLATE_SETTINGS,
+    ),
+    LoraModelTemplate(
+        key="qwen36-35b-a3b",
+        label="Qwen 3.6 35B-A3B · MoE",
+        model_id="Qwen/Qwen3.6-35B-A3B",
+        family="Qwen 3.6",
+        architecture="35B total / 3B active MoE",
+        summary=(
+            "The requested A3B model: 35B total parameters with 3B active. The safe template "
+            "adapts attention and linear-attention paths; routed experts stay frozen by default."
+        ),
+        hardware="Server-class memory despite only 3B active parameters; begin with QLoRA",
+        default_preset="low-vram",
+        parameter_billions=35.0,
+        qlora_below_vram_gb=96,
+        high_detail_vram_gb=160,
+        min_axolotl="0.16.0",
+        settings=_QWEN_TEXT_TEMPLATE_SETTINGS,
+        moe=True,
+    ),
+    LoraModelTemplate(
+        key="gemma4-e2b",
+        label="Gemma 4 E2B IT · compact",
+        model_id="google/gemma-4-E2B-it",
+        family="Gemma 4",
+        architecture="2.3B effective / 5.1B total",
+        summary=(
+            "Compact instruction-tuned Gemma 4. The template targets only the text decoder and "
+            "uses Gemma 4's native system-role chat format."
+        ),
+        hardware="Balanced LoRA with comfortable memory; QLoRA on smaller GPUs",
+        default_preset="balanced",
+        parameter_billions=5.1,
+        qlora_below_vram_gb=16,
+        high_detail_vram_gb=32,
+        min_axolotl="0.16.1",
+        settings=_GEMMA4_TEXT_TEMPLATE_SETTINGS,
+    ),
+    LoraModelTemplate(
+        key="gemma4-e4b",
+        label="Gemma 4 E4B IT · stronger",
+        model_id="google/gemma-4-E4B-it",
+        family="Gemma 4",
+        architecture="4.5B effective / 8B total",
+        summary=(
+            "The stronger on-device Gemma 4 option. Its per-layer embeddings make the actual "
+            "checkpoint larger than the E4B name suggests, so QLoRA is the safer first run."
+        ),
+        hardware="QLoRA is the conservative default; total checkpoint size is about 8B parameters",
+        default_preset="low-vram",
+        parameter_billions=8.0,
+        qlora_below_vram_gb=24,
+        high_detail_vram_gb=48,
+        min_axolotl="0.16.1",
+        settings=_GEMMA4_TEXT_TEMPLATE_SETTINGS,
+    ),
+)
+
 LORA_BASE_MODELS: tuple[tuple[str, str], ...] = (
+    *((template.label, template.model_id) for template in LORA_MODEL_TEMPLATES),
     (
         "Llama 3.2 1B · smallest starter",
         "unsloth/Llama-3.2-1B-Instruct",
@@ -58,6 +256,13 @@ LORA_BASE_MODELS: tuple[tuple[str, str], ...] = (
 )
 
 LORA_BASE_MODEL_HINTS: Mapping[str, str] = {
+    **{
+        template.model_id: (
+            f"{template.summary} Default recipe: {template.default_preset.replace('-', ' ')}. "
+            f"Requires Axolotl {template.min_axolotl}+."
+        )
+        for template in LORA_MODEL_TEMPLATES
+    },
     "unsloth/Llama-3.2-1B-Instruct": (
         "Best first run: small, quick to iterate, and easy to package with a matching Llama base."
     ),
@@ -80,11 +285,43 @@ OLLAMA_BASE_HINTS = {
     "meta-llama/Llama-3.2-3B-Instruct": "llama3.2:3b",
     "google/gemma-2-2b-it": "gemma2:2b",
     "mistralai/Mistral-7B-Instruct-v0.3": "mistral:7b",
+    "Qwen/Qwen3.5-2B": "qwen3.5:2b",
+    "Qwen/Qwen3.5-4B": "qwen3.5:4b",
+    "Qwen/Qwen3.5-9B": "qwen3.5:9b",
+    "Qwen/Qwen3.6-27B": "qwen3.6:27b",
+    "Qwen/Qwen3.6-35B-A3B": "qwen3.6:35b-a3b",
+    "google/gemma-4-E2B-it": "gemma4:e2b",
+    "google/gemma-4-E4B-it": "gemma4:e4b",
 }
 
 _PROJECT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 _DATASET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.jsonl$")
 _PLACEHOLDER_MARKERS = ("[edit me", "<edit me", "replace this", "todo:")
+_LORA_MODEL_TEMPLATES_BY_ID = {
+    template.model_id.casefold(): template for template in LORA_MODEL_TEMPLATES
+}
+
+_MODEL_TEMPLATE_RESET_KEYS = (
+    "processor_type",
+    "chat_template",
+    "eot_tokens",
+    "lora_target_modules",
+    "lora_target_parameters",
+    "quantize_moe_experts",
+    "activation_offloading",
+    "freeze_mm_modules",
+    "skip_prepare_dataset",
+    "remove_unused_columns",
+    "gradient_checkpointing_kwargs",
+    "gemma4_hybrid_attn_impl",
+    "plugins",
+    "use_kernels",
+    "use_scattermoe",
+    "experts_implementation",
+    "lora_qkv_kernel",
+    "lora_o_kernel",
+    "lora_mlp_kernel",
+)
 
 
 @dataclass(frozen=True)
@@ -403,7 +640,10 @@ def beginner_config_updates(
             raise LoraStudioError("Choose one of the guided memory profiles.")
         preset = "low-vram" if memory_profile == LORA_MEMORY_PROFILES[1] else "balanced"
     selected = get_lora_preset(preset or DEFAULT_LORA_PRESET)
+    model_template = get_lora_model_template(base_model)
     updates: dict[str, Any] = {
+        # Clear architecture-specific fields left by a previously selected model.
+        **{key: None for key in _MODEL_TEMPLATE_RESET_KEYS},
         "base_model": base_model.strip(),
         "model_type": "AutoModelForCausalLM",
         "tokenizer_type": "AutoTokenizer",
@@ -438,6 +678,12 @@ def beginner_config_updates(
         "strict": False,
     }
     updates.update(selected.settings)
+    if model_template is not None:
+        updates.update(model_template.settings)
+        if model_template.moe:
+            # Axolotl forbids the generic all-linear target when expert quantization
+            # is enabled. The model template already uses explicit attention targets.
+            updates["quantize_moe_experts"] = selected.method == "QLORA"
     return updates
 
 
@@ -448,6 +694,12 @@ def get_lora_preset(key: str) -> LoraPreset:
         return _LORA_PRESETS_BY_KEY[key]
     except KeyError as exc:
         raise LoraStudioError("Choose one of the guided smart presets.") from exc
+
+
+def get_lora_model_template(base_model: str) -> LoraModelTemplate | None:
+    """Return architecture defaults for a known official model checkpoint."""
+
+    return _LORA_MODEL_TEMPLATES_BY_ID.get(base_model.strip().casefold())
 
 
 def infer_lora_preset(cfg: Mapping[str, Any]) -> str:
@@ -473,6 +725,16 @@ def recommend_lora_preset(
     base_model: str,
 ) -> str:
     """Recommend a recipe from detected VRAM and the selected model size."""
+
+    model_template = get_lora_model_template(base_model)
+    if model_template is not None:
+        if gpu_vram_gb is None or gpu_vram_gb <= 0:
+            return model_template.default_preset
+        if gpu_vram_gb < model_template.qlora_below_vram_gb:
+            return "low-vram"
+        if gpu_vram_gb >= model_template.high_detail_vram_gb:
+            return "high-detail"
+        return "balanced"
 
     model_size = _model_size_billions(base_model)
     if gpu_vram_gb is None or gpu_vram_gb <= 0:
@@ -976,16 +1238,19 @@ __all__ = [
     "LORA_GOALS",
     "LORA_GOAL_HINTS",
     "LORA_MEMORY_PROFILES",
+    "LORA_MODEL_TEMPLATES",
     "LORA_PRESETS",
     "LORA_PRESET_KEYS",
     "LORA_TUNING_HINTS",
     "LoraPreset",
+    "LoraModelTemplate",
     "LoraStudioError",
     "LoraTuningHint",
     "beginner_config_updates",
     "chat_example_line",
     "discover_adapter_artifacts",
     "get_lora_preset",
+    "get_lora_model_template",
     "infer_lora_preset",
     "inspect_configured_dataset",
     "inspect_jsonl_text",

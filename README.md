@@ -74,11 +74,12 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 - Beginner-first **LoRA Studio** with a four-step Setup → Data → Train → Test journey for
   personality, agent-behavior, and hybrid adapters. The setup wizard offers hardware-aware smart
   presets for a quick check, everyday chat, low-VRAM QLoRA, and higher-capacity training, then
-  translates plain choices into a normal Axolotl YAML config. Every beginner option explains its
-  effect, and a current-value tuning guide says what to change, when, and why. A plain conversation
-  form creates and saves chat JSONL without requiring users to write JSON; the collapsible raw
-  editor validates bulk edits, calls out unfinished placeholders, and keeps a backup when a draft
-  is overwritten.
+  translates plain choices into a normal Axolotl YAML config. Architecture-aware templates cover
+  Qwen 3.5 2B/4B/9B, Qwen 3.6 27B/35B-A3B, and Gemma 4 E2B/E4B with the correct chat format,
+  text-backbone targets, and safe first recipe. Every beginner option explains its effect, and a
+  current-value tuning guide says what to change, when, and why. A plain conversation form creates
+  and saves chat JSONL without requiring users to write JSON; the collapsible raw editor validates
+  bulk edits, calls out unfinished placeholders, and keeps a backup when a draft is overwritten.
 - Focused LoRA training gate and monitor with plain-language settings, preflight/data readiness,
   live process/GPU/RAM state, Axolotl logs, a one-click preflight-gated start, optional standalone
   preprocessing, safe stop controls, and automatic Safetensors adapter discovery.

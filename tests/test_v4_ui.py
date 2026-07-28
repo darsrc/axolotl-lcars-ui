@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import lcars_ui as lcars
@@ -87,6 +88,19 @@ class V44UiTests(unittest.TestCase):
         self.assertTrue(
             all(option.description for option in self.widgets["lora-goal"].options)
         )
+        model_options = {
+            option.value: option.description
+            for option in self.widgets["lora-base-model"].options
+        }
+        for template in main.LORA_MODEL_TEMPLATES:
+            with self.subTest(model=template.model_id):
+                self.assertIn(template.model_id, model_options)
+                self.assertTrue(model_options[template.model_id])
+        self.assertEqual(len(self.widgets["lora-model-template-table"].rows), 7)
+        self.assertIn(
+            "Architecture",
+            self.widgets["lora-model-template-table"].headers,
+        )
         self.assertIn("only need", self.widgets["lora-train-controls-help"].content.lower())
         self.assertIn("Starter range", self.widgets["lora-tuning-table"].headers)
         self.assertIn(
@@ -143,6 +157,52 @@ class V44UiTests(unittest.TestCase):
         )
         self.assertEqual(self.widgets["lora-test-log"].stream_id, main.LOG_OLLAMA)
 
+    def test_internal_page_links_install_client_side_tab_navigation(self) -> None:
+        app = main.FastAPI()
+
+        @app.get("/")
+        def root() -> str:
+            return "<html><body>LCARS</body></html>"
+
+        @app.get("/{full_path:path}")
+        def fallback(full_path: str) -> str:
+            return full_path
+
+        main._install_internal_navigation(app)
+
+        root_route = next(
+            route
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/"
+            and "GET" in (getattr(route, "methods", set()) or set())
+        )
+        page = root_route.endpoint()
+        self.assertIn(
+            '<script type="module" src="/lcars/internal-navigation.js"></script>',
+            page,
+        )
+        script_route = next(
+            route
+            for route in app.router.routes
+            if getattr(route, "path", "") == "/lcars/internal-navigation.js"
+        )
+        self.assertLess(
+            app.router.routes.index(script_route),
+            next(
+                index
+                for index, route in enumerate(app.router.routes)
+                if getattr(route, "path", "") == "/{full_path:path}"
+            ),
+        )
+        script_response = script_route.endpoint()
+        self.assertEqual(
+            Path(script_response.path),
+            main.INTERNAL_NAVIGATION_SCRIPT,
+        )
+        script = main.INTERNAL_NAVIGATION_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("event.preventDefault()", script)
+        self.assertIn('document.querySelectorAll(".lcars-rail-btn")', script)
+
     def test_guided_setup_only_replaces_an_untouched_dataset_template(self) -> None:
         template = main.starter_dataset_template(
             main.LORA_GOALS[0],
@@ -158,6 +218,42 @@ class V44UiTests(unittest.TestCase):
                 "helpful-captain",
             )
         )
+
+    def test_saving_data_preserves_known_models_top_level_chat_template(self) -> None:
+        report = main.DatasetReport(
+            source="./data/qwen-project.jsonl",
+            source_kind="local",
+            dataset_type="chat_template",
+            example_count=1,
+        )
+        with (
+            patch.object(
+                main,
+                "_load_config_or_empty",
+                return_value={"base_model": "Qwen/Qwen3.5-4B"},
+            ),
+            patch.object(
+                main,
+                "save_chat_jsonl",
+                return_value=(Path("/project/data/qwen-project.jsonl"), report),
+            ),
+            patch.object(main, "_workflow_blocks_config_change", return_value=False),
+            patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
+            patch.object(main.STATE, "refresh_preflight", return_value=[]),
+            patch.object(main, "_set_session_value"),
+            patch.object(main, "_update_config_widgets"),
+            patch.object(main, "_update_preflight_widgets"),
+            patch.object(main, "_update_lora_widgets"),
+            patch.object(main.lcars, "notify"),
+        ):
+            saved = main._lora_save_dataset_action(
+                "qwen-project.jsonl",
+                '{"messages": []}',
+            )
+
+        self.assertTrue(saved)
+        updates = apply_updates.call_args.args[0]
+        self.assertIsNone(updates["datasets.0.chat_template"])
 
     def test_easy_example_builder_replaces_the_untouched_template_then_saves(self) -> None:
         original_ctx = get_ctx()
