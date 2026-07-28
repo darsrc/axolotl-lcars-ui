@@ -33,10 +33,11 @@ Useful launch forms:
 
 The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 
-`launch.sh` prefers `.venv`, then `venv`, then a single other virtualenv directly inside the
-project. It exports that environment's `VIRTUAL_ENV` and prepends its `bin` directory to `PATH`,
-which lets the UI discover an `axolotl` executable installed there. To choose a specific
-environment:
+`launch.sh` first uses an already-active virtualenv from `VIRTUAL_ENV`. Otherwise it prefers
+`.venv`, then `venv`, then a single other virtualenv directly inside the project. It exports the
+selected environment's `VIRTUAL_ENV` and prepends its `bin` directory to `PATH`, which lets the UI
+discover an `axolotl` executable installed there. To choose a specific environment with the
+highest-priority override:
 
 ```bash
 AXOLOTL_LCARS_VENV=axolotl-training ./launch.sh

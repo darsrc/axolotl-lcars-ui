@@ -44,9 +44,10 @@ Start the app:
 ./launch.sh
 ```
 
-The launcher prefers `.venv`, then `venv`, then a single other virtualenv directly inside the
-project. It activates the selected environment for the child process, so an `axolotl` executable
-installed in that environment is visible to the UI. Select a specific environment when needed:
+The launcher first uses an already-active virtualenv from `VIRTUAL_ENV`. Otherwise it prefers
+`.venv`, then `venv`, then a single other virtualenv directly inside the project. It activates the
+selected environment for the child process, so an `axolotl` executable installed there is visible
+to the UI. Select a specific environment with the highest-priority override when needed:
 
 ```bash
 AXOLOTL_LCARS_VENV=axolotl-training ./launch.sh

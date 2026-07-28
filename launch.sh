@@ -26,7 +26,8 @@ Args:
   open, --open           Open the app in the default browser
 
 Environment:
-  AXOLOTL_LCARS_VENV      Project venv path to use instead of auto-detection
+  AXOLOTL_LCARS_VENV      Explicit venv path (highest priority)
+  VIRTUAL_ENV             Active venv, used before project auto-detection
 EOF
 }
 
@@ -50,6 +51,15 @@ select_venv() {
     fi
     VENV_DIR="$candidate"
     return 0
+  fi
+
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    candidate="$VIRTUAL_ENV"
+    if is_venv "$candidate"; then
+      VENV_DIR="$candidate"
+      return 0
+    fi
+    echo "Ignoring unusable active virtualenv from VIRTUAL_ENV: $candidate" >&2
   fi
 
   for candidate in "$ROOT_DIR/.venv" "$ROOT_DIR/venv"; do

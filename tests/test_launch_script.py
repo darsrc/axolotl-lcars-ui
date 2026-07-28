@@ -46,6 +46,10 @@ class LaunchScriptTests(unittest.TestCase):
         return venv
 
     def _run(self, root: Path, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        if env is None:
+            env = os.environ.copy()
+            env.pop("VIRTUAL_ENV", None)
+            env.pop("AXOLOTL_LCARS_VENV", None)
         return subprocess.run(
             ["bash", str(root / "launch.sh"), "--port", "8123"],
             cwd=root,
@@ -61,7 +65,7 @@ class LaunchScriptTests(unittest.TestCase):
             root = self._project_copy(Path(temp))
             venv = self._fake_venv(root, ".venv")
 
-            result = self._run(root, env=os.environ.copy())
+            result = self._run(root)
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"Using virtual environment: {venv}", result.stdout)
@@ -78,11 +82,45 @@ class LaunchScriptTests(unittest.TestCase):
             root = self._project_copy(Path(temp))
             venv = self._fake_venv(root, "axolotl-training")
 
-            result = self._run(root, env=os.environ.copy())
+            result = self._run(root)
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"Using virtual environment: {venv}", result.stdout)
             self.assertIn(f"TEST_VIRTUAL_ENV={venv}", result.stdout)
+
+    def test_active_venv_takes_precedence_over_project_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            root = self._project_copy(temp_path)
+            self._fake_venv(root, ".venv")
+            active_venv = self._fake_venv(temp_path, "active-venv")
+            env = os.environ.copy()
+            env.pop("AXOLOTL_LCARS_VENV", None)
+            env["VIRTUAL_ENV"] = str(active_venv)
+
+            result = self._run(root, env=env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Using virtual environment: {active_venv}", result.stdout)
+            self.assertIn(f"Axolotl CLI: {active_venv / 'bin/axolotl'}", result.stdout)
+            self.assertIn(f"TEST_VIRTUAL_ENV={active_venv}", result.stdout)
+            self.assertIn(f"TEST_PATH={active_venv / 'bin'}:", result.stdout)
+
+    def test_explicit_override_takes_precedence_over_active_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            temp_path = Path(temp)
+            root = self._project_copy(temp_path)
+            chosen_venv = self._fake_venv(root, "chosen-venv")
+            active_venv = self._fake_venv(temp_path, "active-venv")
+            env = os.environ.copy()
+            env["VIRTUAL_ENV"] = str(active_venv)
+            env["AXOLOTL_LCARS_VENV"] = "chosen-venv"
+
+            result = self._run(root, env=env)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Using virtual environment: {chosen_venv}", result.stdout)
+            self.assertIn(f"TEST_VIRTUAL_ENV={chosen_venv}", result.stdout)
 
     def test_missing_venv_is_created_and_populated_with_uv(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -121,6 +159,8 @@ class LaunchScriptTests(unittest.TestCase):
             )
             uv.chmod(0o755)
             env = os.environ.copy()
+            env.pop("VIRTUAL_ENV", None)
+            env.pop("AXOLOTL_LCARS_VENV", None)
             env["PATH"] = f"{tools}:{env['PATH']}"
             env["UV_TEST_LOG"] = str(uv_log)
 
