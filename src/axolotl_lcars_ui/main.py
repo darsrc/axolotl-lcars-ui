@@ -7,6 +7,7 @@ import asyncio
 import html
 import math
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,21 @@ from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigError, ConfigStore,
 from axolotl_lcars_ui.hf_manager import (
     HuggingFaceManager,
     cache_summary_text,
+)
+from axolotl_lcars_ui.lora_studio import (
+    LORA_BASE_MODELS,
+    LORA_GOALS,
+    LORA_MEMORY_PROFILES,
+    DatasetReport,
+    LoraStudioError,
+    beginner_config_updates,
+    discover_adapter_artifacts,
+    inspect_configured_dataset,
+    inspect_jsonl_text,
+    normalize_project_name,
+    save_chat_jsonl,
+    starter_dataset_template,
+    suggested_ollama_model,
 )
 from axolotl_lcars_ui.ollama import OllamaManager
 from axolotl_lcars_ui.resources import (
@@ -48,6 +64,7 @@ from lcars_ui.dsl.api import _index_form_children
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOG_AXOLOTL = "axolotl-run-log"
 LOG_HF = "hf-log"
+LOG_OLLAMA = "ollama-test-log"
 WORKFLOW_CANVAS_ID = "axolotl-workflow-canvas"
 HF_RESULTS_TABLE_ID = "hf-results-table"
 HF_RESULTS_PAGE_SIZE = 10
@@ -171,7 +188,7 @@ SETUP_FIELD_KEYS = {
 }
 
 MODEL_PRESETS = [
-    "NousResearch/Llama-3.2-1B",
+    "unsloth/Llama-3.2-1B-Instruct",
     "Qwen/Qwen2.5-1.5B-Instruct",
     "google/gemma-2-2b",
     "mistralai/Mistral-7B-v0.1",
@@ -186,6 +203,8 @@ DATASET_PRESETS = {
     ),
     "./data/train.jsonl | completion": ("./data/train.jsonl", "completion"),
 }
+
+LORA_BASE_MODEL_VALUES = tuple(value for _, value in LORA_BASE_MODELS)
 
 SETUP_RECIPES: dict[str, dict[str, Any]] = {
     "LoRA SFT starter": {
@@ -257,6 +276,10 @@ class AppState:
     preflight: AxolotlPreflight
     preflight_issues: list[PreflightIssue] = field(default_factory=list)
     resource_tick: int = 0
+    lora_base_response: str = ""
+    lora_tuned_response: str = ""
+    lora_base_response_meta: str = "Not tested yet."
+    lora_tuned_response_meta: str = "Not tested yet."
 
     def refresh_preflight(self) -> list[PreflightIssue]:
         try:
@@ -298,14 +321,41 @@ UI_STATE = UiStateStore(PROJECT_ROOT)
 def _persisted_widget_defaults() -> dict[str, Any]:
     """Typed fallbacks for every preference mirrored outside the active YAML."""
 
+    try:
+        cfg = STATE.config_store.load()
+    except ConfigError:
+        cfg = {}
+    project_name = Path(STATE.config_store.active_name).stem
+    base_model = str(cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
     ollama_name = (
         STATE.ollama.selected.name
         if STATE.ollama.selected is not None
         else (STATE.ollama.models[0].name if STATE.ollama.models else "")
     )
+    suggested_base = suggested_ollama_model(
+        base_model,
+        [model.name for model in STATE.ollama.models],
+    )
+    artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg, limit=1)
+    adapter_path = str(artifacts[0].path) if artifacts else str(cfg.get("output_dir") or "")
+    test_model_name = f"{project_name}-lora"
+    installed_names = {model.name for model in STATE.ollama.models}
+    chat_model = test_model_name if test_model_name in installed_names else suggested_base
     return {
         "active-config-select": STATE.config_store.active_name,
         "new-config-name": "experiment.yml",
+        "lora-project-name": project_name,
+        "lora-goal": LORA_GOALS[0],
+        "lora-base-model": base_model,
+        "lora-memory-profile": LORA_MEMORY_PROFILES[0],
+        "lora-data-filename": f"{project_name}.jsonl",
+        "lora-test-base-model": suggested_base,
+        "lora-test-adapter-path": adapter_path,
+        "lora-test-model-name": test_model_name,
+        "lora-test-chat-model": chat_model,
+        "lora-test-compare-base": suggested_base,
+        "lora-test-system": "",
+        "lora-test-prompt": "Introduce yourself and explain how you would help me.",
         "setup-recipe": next(iter(SETUP_RECIPES)),
         "setup-model-preset": MODEL_PRESETS[0],
         "setup-dataset-preset": next(iter(DATASET_PRESETS)),
@@ -334,8 +384,24 @@ def _persisted_widget_defaults() -> dict[str, Any]:
 
 
 def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
+    ollama_names = tuple(model.name for model in STATE.ollama.models)
+    try:
+        current_base = str(STATE.config_store.load().get("base_model") or "").strip()
+    except ConfigError:
+        current_base = ""
+    lora_base_choices = (
+        (*LORA_BASE_MODEL_VALUES, current_base)
+        if current_base and current_base not in LORA_BASE_MODEL_VALUES
+        else LORA_BASE_MODEL_VALUES
+    )
     return {
         "active-config-select": tuple(STATE.config_store.list_configs()),
+        "lora-goal": tuple(LORA_GOALS),
+        "lora-base-model": lora_base_choices,
+        "lora-memory-profile": tuple(LORA_MEMORY_PROFILES),
+        "lora-test-base-model": ("", *ollama_names),
+        "lora-test-chat-model": ("", *ollama_names),
+        "lora-test-compare-base": ("", *ollama_names),
         "setup-recipe": tuple(SETUP_RECIPES),
         "setup-model-preset": tuple(MODEL_PRESETS),
         "setup-dataset-preset": tuple(DATASET_PRESETS),
@@ -382,6 +448,12 @@ def _normalized_persisted_widget_value(
     text = str(value)
     limits = {
         "new-config-name": 128,
+        "lora-project-name": 64,
+        "lora-data-filename": 128,
+        "lora-test-adapter-path": 1024,
+        "lora-test-model-name": 256,
+        "lora-test-system": 8192,
+        "lora-test-prompt": 8192,
         "run-cli-args": 4096,
         "run-launcher-args": 4096,
         "hf-query": 512,
@@ -395,6 +467,10 @@ def _normalized_persisted_widget_value(
         return str(default)
     if widget_id == "new-config-name" and (
         not text.endswith((".yml", ".yaml")) or "/" in text or "\\" in text
+    ):
+        return str(default)
+    if widget_id == "lora-data-filename" and (
+        not text.endswith(".jsonl") or "/" in text or "\\" in text
     ):
         return str(default)
     return text
@@ -469,6 +545,11 @@ def build_ui() -> None:
         sound_enabled=True,
     )
 
+    lcars.nav("LoRA Studio", page="lora", color="pale-canary")
+    lcars.nav("1 · Setup", page="lora-setup", color="tanoi")
+    lcars.nav("2 · Data", page="lora-data", color="golden-tanoi")
+    lcars.nav("3 · Train", page="lora-train", color="red")
+    lcars.nav("4 · Test", page="lora-test", color="lilac")
     lcars.nav("Command", page="command", color="tanoi")
     lcars.nav("Config", page="config", color="golden-tanoi")
     lcars.nav("Setup", page="config-setup", color="pale-canary")
@@ -483,6 +564,11 @@ def build_ui() -> None:
     lcars.nav("Content", page="content", color="blue-bell")
     lcars.nav("Ollama", page="ollama", color="pale-canary")
 
+    _lora_home_page()
+    _lora_setup_page()
+    _lora_data_page()
+    _lora_train_page()
+    _lora_test_page()
     _command_page()
     _config_page()
     _config_setup_page()
@@ -496,6 +582,913 @@ def build_ui() -> None:
     _hub_page()
     _content_page()
     _ollama_page()
+
+
+def _lora_home_page() -> None:
+    cfg = _load_config_or_empty()
+    dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
+    steps = _lora_journey_rows(cfg, dataset, bool(artifacts))
+    completed = sum(1 for row in steps if row["Status"] == "READY")
+
+    with lcars.page("LoRA Studio", id="lora", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Your First LoRA",
+            color="pale-canary",
+            id="lora-home-intro-panel",
+            weight=12,
+            aspect="wide",
+            group="lora-home",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.header(
+                "Teach a small behavior layer—not a whole model",
+                size="h2",
+                color="pale-canary",
+                id="lora-home-title",
+            )
+            lcars.markdown(
+                "A **LoRA** is a compact set of learned changes attached to a base model. "
+                "Use it for a repeatable voice, response style, decision pattern, or narrow skill. "
+                "The four guided pages below write a normal Axolotl config, so the advanced pages "
+                "remain available when you are ready.",
+                id="lora-home-explainer",
+            )
+            lcars.progress(
+                "Guided journey",
+                completed / len(steps) * 100,
+                color="tanoi",
+                id="lora-home-progress",
+                options=lcars.MeterOptions(
+                    unit="%",
+                    segments=4,
+                    ticks=True,
+                    description=f"{completed} of {len(steps)} stages ready",
+                ),
+            )
+            _enhanced_table(
+                steps,
+                title="Four Steps",
+                id="lora-journey-table",
+                filter_columns={"Step", "Status"},
+            )
+            lcars.markdown(
+                "[Start with setup](?page=lora-setup) · "
+                "[Open training data](?page=lora-data) · "
+                "[Monitor training](?page=lora-train) · "
+                "[Test with Ollama](?page=lora-test)",
+                id="lora-home-links",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+        with lcars.data_panel(
+            "What You Can Teach",
+            color="tanoi",
+            id="lora-home-teach-panel",
+            weight=8,
+            aspect="wide",
+            group="lora-concepts",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                [
+                    {
+                        "Goal": "Personality",
+                        "LoRA learns": "Voice, tone, phrasing, boundaries, conversational habits",
+                        "Runtime still supplies": "Facts, context window, memory",
+                    },
+                    {
+                        "Goal": "Agent behavior",
+                        "LoRA learns": "Planning style, when to ask, tool-call patterns, recovery habits",
+                        "Runtime still supplies": "Actual tools, permissions, memory, execution loop",
+                    },
+                    {
+                        "Goal": "Narrow skill",
+                        "LoRA learns": "A repeated input → ideal-output pattern",
+                        "Runtime still supplies": "General reasoning and outside knowledge",
+                    },
+                ],
+                title="LoRA Boundaries",
+                id="lora-teaching-table",
+                filter_columns={"Goal"},
+            )
+
+        with lcars.data_panel(
+            "Before Spending GPU Time",
+            color="golden-tanoi",
+            id="lora-home-advice-panel",
+            weight=7,
+            aspect="wide",
+            group="lora-concepts",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "1. Try the behavior as a **system prompt** first.\n"
+                "2. Fine-tune only when you have examples of the exact answers you want.\n"
+                "3. Prefer a smaller test run before a long run.\n"
+                "4. Keep a few prompts out of training so you can test generalization.\n\n"
+                "LoRA improves consistency; it does not verify facts or make unsafe tool access safe.",
+                id="lora-home-advice",
+            )
+
+
+def _lora_setup_page() -> None:
+    cfg = _load_config_or_empty()
+    current_base = str(cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
+    base_options = [
+        lcars.SelectOption(label=label, value=value) for label, value in LORA_BASE_MODELS
+    ]
+    if current_base and current_base not in LORA_BASE_MODEL_VALUES:
+        base_options.insert(
+            0,
+            lcars.SelectOption(
+                label=f"{current_base} · current custom model",
+                value=current_base,
+            ),
+        )
+    project_default = Path(STATE.config_store.active_name).stem
+    _seed_text("lora-project-name", project_default)
+
+    with lcars.page("LoRA Setup", id="lora-setup", layout="grid", fillers=False):
+        with lcars.control_panel(
+            "Beginner Setup",
+            color="tanoi",
+            id="lora-setup-wizard-panel",
+            weight=8,
+            aspect="tall",
+            group="lora-setup",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Choose four things. The wizard fills the model, adapter, memory, optimizer, "
+                "dataset, output, and safety settings in a dedicated YAML config.",
+                id="lora-setup-help",
+            )
+            with lcars.form(
+                "LoRA Project",
+                action_id="lora-setup-save",
+                submit_label="Create / Save Guided Project",
+                id="lora-setup-form",
+                color="tanoi",
+                options=lcars.FormOptions(layout="stack"),
+            ):
+                project_name = lcars.text_input(
+                    "Project Name",
+                    value=project_default,
+                    placeholder="helpful-captain",
+                    autocomplete=False,
+                    id="lora-project-name",
+                    options=lcars.TextInputOptions(
+                        description="Becomes configs/name.yml, data/name.jsonl, and outputs/name.",
+                        validation=lcars.ValidationOptions(
+                            required=True,
+                            pattern=r"^[A-Za-z0-9][A-Za-z0-9 _-]{1,62}$",
+                            message="Use 2–63 letters, numbers, spaces, dashes, or underscores.",
+                        ),
+                    ),
+                )
+                goal = lcars.select(
+                    "What Are You Teaching?",
+                    list(LORA_GOALS),
+                    value=LORA_GOALS[0],
+                    id="lora-goal",
+                )
+                base_model = lcars.select(
+                    "Base Model",
+                    base_options,
+                    value=current_base,
+                    id="lora-base-model",
+                    settings=SEARCHABLE_CHOICES,
+                )
+                memory_profile = lcars.select(
+                    "Memory Profile",
+                    list(LORA_MEMORY_PROFILES),
+                    value=LORA_MEMORY_PROFILES[0],
+                    id="lora-memory-profile",
+                )
+            if _is_active_action("lora-setup-save"):
+                _lora_setup_action(project_name, goal, base_model, memory_profile)
+
+        with lcars.data_panel(
+            "What The Wizard Chose",
+            color="pale-canary",
+            id="lora-setup-plan-panel",
+            weight=11,
+            aspect="wide",
+            group="lora-setup",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                _lora_training_plan_rows(cfg),
+                title="Plain-Language Plan",
+                id="lora-setup-plan-table",
+                filter_columns={"Choice", "Why"},
+                copy_columns={"Value"},
+            )
+            lcars.markdown(
+                "[Next: write training examples](?page=lora-data) · "
+                "[Browse base models](?page=hub) · "
+                "[Open every Axolotl field](?page=config)",
+                id="lora-setup-links",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+        with lcars.data_panel(
+            "Memory Choice",
+            color="anakiwa",
+            id="lora-memory-help-panel",
+            weight=7,
+            aspect="wide",
+            group="lora-setup-help",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                [
+                    {
+                        "Profile": LORA_MEMORY_PROFILES[0],
+                        "Use when": "You want the smoothest Ollama adapter-import path",
+                        "Tradeoff": "Uses more VRAM than QLoRA",
+                    },
+                    {
+                        "Profile": LORA_MEMORY_PROFILES[1],
+                        "Use when": "The balanced run does not fit on your GPU",
+                        "Tradeoff": "Ollama recommends non-quantized adapters for import",
+                    },
+                ],
+                title="Memory Profiles",
+                id="lora-memory-help-table",
+                filter_columns={"Profile"},
+            )
+
+
+def _lora_data_page() -> None:
+    cfg = _load_config_or_empty()
+    report = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    project_name = _widget_value(
+        "lora-project-name",
+        Path(STATE.config_store.active_name).stem,
+    )
+    goal = _widget_value("lora-goal", LORA_GOALS[0])
+    filename_default = f"{project_name}.jsonl"
+    _seed_text("lora-data-filename", filename_default)
+    _seed_text(
+        "lora-data-editor",
+        starter_dataset_template(goal, project_name.replace("-", " ").title()),
+    )
+
+    with lcars.page("LoRA Data", id="lora-data", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Configured Dataset Readiness",
+            color="golden-tanoi",
+            id="lora-data-status-panel",
+            weight=10,
+            aspect="wide",
+            group="lora-data",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.metric(
+                "Status",
+                report.status,
+                status="ok" if report.ready else ("crit" if report.errors else "warn"),
+                color="golden-tanoi",
+                id="lora-data-status",
+                options=lcars.MetricOptions(secondary_value=report.source or "No source"),
+            )
+            lcars.metric(
+                "Examples",
+                "REMOTE" if report.example_count is None else str(report.example_count),
+                status=(
+                    "ok"
+                    if report.example_count is None or report.example_count >= 20
+                    else "warn"
+                ),
+                color="tanoi",
+                id="lora-data-example-count",
+                options=lcars.MetricOptions(
+                    secondary_value=f"{report.message_count} chat messages"
+                ),
+            )
+            lcars.metric(
+                "Saved Placeholders",
+                str(report.placeholder_count),
+                status="warn" if report.placeholder_count else "ok",
+                color="lilac",
+                id="lora-data-placeholder-count",
+                options=lcars.MetricOptions(secondary_value="must be replaced before training"),
+            )
+            _enhanced_table(
+                _lora_dataset_issue_rows(report),
+                title="Data Checks",
+                id="lora-data-checks-table",
+                filter_columns={"Level", "Detail"},
+            )
+
+        with lcars.control_panel(
+            "Training Example Editor",
+            color="golden-tanoi",
+            id="lora-data-editor-panel",
+            weight=12,
+            aspect="tall",
+            group="lora-data",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Each line is one conversation. Replace every **EDIT ME** answer with the exact "
+                "response the model should imitate. Add more lines for different wording, edge "
+                "cases, corrections, boundaries, and failures.",
+                id="lora-data-editor-help",
+            )
+            with lcars.form(
+                "JSONL Dataset",
+                action_id="lora-data-save",
+                submit_label="Validate & Save Draft",
+                id="lora-data-form",
+                color="golden-tanoi",
+            ):
+                filename = lcars.text_input(
+                    "Dataset Filename",
+                    value=filename_default,
+                    placeholder="helpful-captain.jsonl",
+                    autocomplete=False,
+                    id="lora-data-filename",
+                    options=lcars.TextInputOptions(
+                        validation=lcars.ValidationOptions(
+                            required=True,
+                            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.jsonl$",
+                            message="Use a simple .jsonl filename.",
+                        )
+                    ),
+                )
+                editor_text = lcars.text_input(
+                    "One JSON Conversation Per Line",
+                    value="",
+                    placeholder='{"messages": [{"role": "user", "content": "..."}, ...]}',
+                    autocomplete=False,
+                    id="lora-data-editor",
+                    options=lcars.TextInputOptions(
+                        multiline=True,
+                        rows=12,
+                        commit="blur",
+                        validation=lcars.ValidationOptions(required=True),
+                    ),
+                )
+            if _is_active_action("lora-data-save"):
+                _lora_save_dataset_action(filename, editor_text)
+            if lcars.button(
+                "Replace Editor With Fresh Template",
+                color="lilac",
+                id="lora-data-reset-template",
+                options=lcars.ButtonOptions(
+                    confirm="Replace the unsaved editor contents with a fresh EDIT ME template?"
+                ),
+            ):
+                _lora_reset_dataset_template_action(goal, project_name)
+            if lcars.button(
+                "Validate Configured File",
+                color="anakiwa",
+                id="lora-data-validate",
+            ):
+                _lora_validate_dataset_action()
+            lcars.text(
+                "When overwriting an existing dataset, the previous version is kept beside it as "
+                "filename.jsonl.bak.",
+                id="lora-data-backup-note",
+            )
+
+        with lcars.data_panel(
+            "Quality Beats Quantity",
+            color="tanoi",
+            id="lora-data-quality-panel",
+            weight=9,
+            aspect="wide",
+            group="lora-data-guide",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                [
+                    {
+                        "Check": "Ideal outputs",
+                        "Good": "Every answer is something you genuinely want copied",
+                        "Avoid": "Descriptions like “respond warmly” instead of the warm response",
+                    },
+                    {
+                        "Check": "Variety",
+                        "Good": "Different wording, difficulty, moods, successes, and failures",
+                        "Avoid": "Near-duplicate prompts",
+                    },
+                    {
+                        "Check": "Boundaries",
+                        "Good": "Examples of uncertainty, refusal, correction, and tool failure",
+                        "Avoid": "Only happy-path greetings",
+                    },
+                    {
+                        "Check": "Evaluation",
+                        "Good": "Keep several realistic prompts out of the training file",
+                        "Avoid": "Testing only memorized training prompts",
+                    },
+                    {
+                        "Check": "Privacy",
+                        "Good": "Synthetic or authorized data with secrets removed",
+                        "Avoid": "Passwords, tokens, private chats, or unlicensed content",
+                    },
+                ],
+                title="Dataset Checklist",
+                id="lora-data-quality-table",
+                filter_columns={"Check"},
+            )
+
+
+def _lora_train_page() -> None:
+    cfg = _load_config_or_empty()
+    dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
+    errors = [issue for issue in STATE.preflight_issues if issue.severity == "error"]
+    can_train = not errors and dataset.ready and not STATE.workflow.is_active
+    snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
+    gpu = snapshot.gpus[0] if snapshot.gpus else None
+
+    with lcars.page("LoRA Train", id="lora-train", layout="console", fillers=False):
+        with lcars.data_panel(
+            "Beginner Launch Gate",
+            color="red",
+            id="lora-train-gate-panel",
+            zone="side",
+            span=(2, 2),
+            weight=8,
+            aspect="tall",
+            group="lora-training",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.metric(
+                "Run Gate",
+                "READY" if can_train else "BLOCKED",
+                status="ok" if can_train else "crit",
+                color="red",
+                id="lora-train-gate",
+                options=lcars.MetricOptions(
+                    secondary_value=_lora_gate_detail(errors, dataset)
+                ),
+            )
+            lcars.metric(
+                "Dataset",
+                dataset.status,
+                status="ok" if dataset.ready else "warn",
+                color="golden-tanoi",
+                id="lora-train-data-status",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        "remote"
+                        if dataset.example_count is None
+                        else f"{dataset.example_count} examples"
+                    )
+                ),
+            )
+            _enhanced_table(
+                _lora_training_brief_rows(cfg, dataset),
+                title="Training Plan",
+                id="lora-train-plan-table",
+                filter_columns={"Choice"},
+                copy_columns={"Value"},
+            )
+
+        with lcars.data_panel(
+            "Live Training Monitor",
+            color="red",
+            id="lora-train-monitor-panel",
+            zone="primary",
+            span=(4, 3),
+            weight=12,
+            aspect="wide",
+            group="lora-training",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.metric(
+                "Axolotl",
+                STATE.runner.status_label(),
+                status=STATE.runner.status_severity(),
+                color="red",
+                id="lora-train-status",
+                options=lcars.MetricOptions(
+                    secondary_value=STATE.config_store.active_name,
+                ),
+            )
+            lcars.metric(
+                "Elapsed",
+                _lora_elapsed_text(),
+                status="ok",
+                color="tanoi",
+                id="lora-train-elapsed",
+                options=lcars.MetricOptions(secondary_value="current / most recent run"),
+            )
+            lcars.metric(
+                "GPU",
+                f"{gpu.utilization:.0f}%" if gpu is not None else "NOT DETECTED",
+                status=(
+                    _percent_status(gpu.utilization) if gpu is not None else "warn"
+                ),
+                color="anakiwa",
+                id="lora-train-gpu",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        f"{format_bytes(gpu.memory_used)} / {format_bytes(gpu.memory_total)}"
+                        if gpu is not None
+                        else "training may be unavailable or CPU-only"
+                    )
+                ),
+            )
+            lcars.metric(
+                "RAM",
+                f"{snapshot.ram_percent:.0f}%",
+                status=_percent_status(snapshot.ram_percent),
+                color="lilac",
+                id="lora-train-ram",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        f"{format_bytes(snapshot.ram_used)} / "
+                        f"{format_bytes(snapshot.ram_total)}"
+                    )
+                ),
+            )
+            lcars.progress(
+                "Training process",
+                _lora_process_progress(),
+                color="red",
+                id="lora-train-progress",
+                options=lcars.MeterOptions(
+                    unit="%",
+                    indeterminate=STATE.runner.is_running(),
+                    description=(
+                        "Axolotl's detailed step and loss output appears in the log below."
+                    ),
+                ),
+            )
+            lcars.log(
+                LOG_AXOLOTL,
+                max_lines=1000,
+                title="Axolotl Training Output",
+                id="lora-training-log",
+                options=LOG_VIEW_OPTIONS,
+            )
+
+        with lcars.control_panel(
+            "Safe Training Controls",
+            color="golden-tanoi",
+            id="lora-train-controls-panel",
+            zone="dock",
+            span=(4, 2),
+            weight=9,
+            aspect="wide",
+            group="lora-training",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            if lcars.button(
+                "1 · Run Readiness Check",
+                color="anakiwa",
+                id="lora-train-preflight",
+            ):
+                _run_preflight_action()
+                _update_lora_widgets()
+            if lcars.button(
+                "2 · Prepare Dataset",
+                color="golden-tanoi",
+                id="lora-train-preprocess",
+                disabled=not dataset.ready or STATE.runner.is_running(),
+                options=lcars.ButtonOptions(
+                    confirm="Validate and preprocess the configured dataset with Axolotl?",
+                    debounce_ms=750,
+                    busy_label="Starting",
+                ),
+            ):
+                _lora_start_action("preprocess")
+            if lcars.button(
+                "3 · Start LoRA Training",
+                color="red",
+                id="lora-train-start",
+                disabled=not can_train or STATE.runner.is_running(),
+                options=lcars.ButtonOptions(
+                    confirm=(
+                        "Start GPU training with this active config? This can run for a long time."
+                    ),
+                    debounce_ms=750,
+                    busy_label="Starting",
+                ),
+            ):
+                _lora_start_action("train")
+            if lcars.button(
+                "Stop Training",
+                color="red",
+                id="lora-train-stop",
+                disabled=not STATE.runner.is_running(),
+                options=lcars.ButtonOptions(
+                    confirm="Ask the active Axolotl process to stop?",
+                    debounce_ms=750,
+                    busy_label="Stopping",
+                ),
+            ):
+                _stop_axolotl_action()
+            lcars.markdown(
+                "[Fix the dataset](?page=lora-data) · "
+                "[Open full console controls](?page=console) · "
+                "[Inspect system resources](?page=resources)",
+                id="lora-train-links",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+        with lcars.data_panel(
+            "Adapter Outputs",
+            color="tanoi",
+            id="lora-artifacts-panel",
+            zone="primary",
+            span=(4, 2),
+            weight=10,
+            aspect="wide",
+            group="lora-artifacts",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            _enhanced_table(
+                _lora_artifact_rows(artifacts),
+                title="Detected Safetensors Adapters",
+                id="lora-artifacts-table",
+                filter_columns={"State", "Base Model"},
+                copy_columns={"Path", "Base Model"},
+            )
+            lcars.markdown(
+                "[Next: package and compare in Ollama](?page=lora-test)",
+                id="lora-artifacts-next",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+
+def _lora_test_page() -> None:
+    cfg = _load_config_or_empty()
+    artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
+    model_names = [model.name for model in STATE.ollama.models]
+    trained_base = str(cfg.get("base_model") or "")
+    base_default = suggested_ollama_model(trained_base, model_names)
+    adapter_default = str(artifacts[0].path) if artifacts else str(cfg.get("output_dir") or "")
+    project_name = _widget_value(
+        "lora-project-name",
+        Path(STATE.config_store.active_name).stem,
+    )
+    tuned_default = f"{project_name}-lora"
+    chat_default = tuned_default if tuned_default in model_names else base_default
+    _seed_text("lora-test-adapter-path", adapter_default)
+    _seed_text("lora-test-model-name", tuned_default)
+    _seed_text("lora-test-system", "")
+    _seed_text(
+        "lora-test-prompt",
+        "Introduce yourself and explain how you would help me.",
+    )
+    select_options = _lora_ollama_select_options(model_names)
+
+    with lcars.page("LoRA Test", id="lora-test", layout="grid", fillers=False):
+        with lcars.data_panel(
+            "Ollama Adapter Gate",
+            color="lilac",
+            id="lora-test-gate-panel",
+            weight=10,
+            aspect="wide",
+            group="lora-test",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.metric(
+                "Ollama",
+                "READY" if model_names else "NOT CONNECTED",
+                status="ok" if model_names else "crit",
+                color="lilac",
+                id="lora-test-ollama-status",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        f"{len(model_names)} local model(s)"
+                        if model_names
+                        else STATE.ollama.last_error or "No local models detected"
+                    )
+                ),
+            )
+            lcars.metric(
+                "Adapter",
+                "FOUND" if artifacts else "NOT FOUND",
+                status="ok" if artifacts else "warn",
+                color="tanoi",
+                id="lora-test-adapter-status",
+                options=lcars.MetricOptions(
+                    secondary_value=adapter_default or "Finish training first"
+                ),
+            )
+            _enhanced_table(
+                [
+                    {
+                        "Requirement": "Exact base",
+                        "Your training value": trained_base,
+                        "Why": "A different Ollama base can produce erratic behavior",
+                    },
+                    {
+                        "Requirement": "Adapter format",
+                        "Your training value": (
+                            "Safetensors detected" if artifacts else "Not detected"
+                        ),
+                        "Why": "Ollama imports the PEFT adapter directory",
+                    },
+                    {
+                        "Requirement": "Architecture",
+                        "Your training value": _lora_architecture_hint(trained_base),
+                        "Why": "Ollama documents adapter import for Llama, Mistral, and Gemma",
+                    },
+                ],
+                title="Compatibility Checklist",
+                id="lora-test-compatibility-table",
+                filter_columns={"Requirement"},
+                copy_columns={"Your training value"},
+            )
+
+        with lcars.control_panel(
+            "1 · Build Tuned Ollama Model",
+            color="lilac",
+            id="lora-test-build-panel",
+            weight=7,
+            aspect="tall",
+            group="lora-test",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "This writes a managed Modelfile and runs `ollama create`. Choose the **same base "
+                "model lineage** used for training. "
+                "[Ollama adapter import guide](https://docs.ollama.com/import)",
+                id="lora-test-build-help",
+                options=lcars.MarkdownOptions(link_target="_blank"),
+            )
+            with lcars.form(
+                "Ollama Adapter Model",
+                action_id="lora-test-build",
+                submit_label="Build Test Model",
+                id="lora-test-build-form",
+                color="lilac",
+            ):
+                ollama_base = lcars.select(
+                    "Installed Ollama Base",
+                    select_options,
+                    value=base_default,
+                    id="lora-test-base-model",
+                    disabled=not model_names,
+                )
+                adapter_path = lcars.text_input(
+                    "Safetensors Adapter Directory",
+                    value=adapter_default,
+                    placeholder="./outputs/my-lora or checkpoint directory",
+                    autocomplete=False,
+                    id="lora-test-adapter-path",
+                    options=lcars.TextInputOptions(
+                        validation=lcars.ValidationOptions(required=True)
+                    ),
+                )
+                model_name = lcars.text_input(
+                    "New Ollama Model Name",
+                    value=tuned_default,
+                    placeholder="helpful-captain-lora",
+                    autocomplete=False,
+                    id="lora-test-model-name",
+                    options=lcars.TextInputOptions(
+                        validation=lcars.ValidationOptions(
+                            required=True,
+                            pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$",
+                            message="Enter a valid local Ollama name with an optional :tag.",
+                        )
+                    ),
+                )
+            if _is_active_action("lora-test-build"):
+                _lora_build_ollama_action(
+                    ollama_base,
+                    adapter_path,
+                    model_name,
+                )
+            if lcars.button(
+                "Refresh Ollama Models",
+                color="anakiwa",
+                id="lora-test-refresh",
+            ):
+                _lora_refresh_ollama_action()
+
+        with lcars.control_panel(
+            "2 · Compare Base And LoRA",
+            color="tanoi",
+            id="lora-test-chat-panel",
+            weight=9,
+            aspect="tall",
+            group="lora-compare",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Use the same prompt and low temperature for both models. Leave the system prompt "
+                "blank first to see what the adapter itself learned.",
+                id="lora-test-chat-help",
+            )
+            with lcars.form(
+                "Side-by-Side Test",
+                action_id="lora-test-compare",
+                submit_label="Run Side-by-Side Comparison",
+                id="lora-test-compare-form",
+                color="tanoi",
+            ):
+                compare_base = lcars.select(
+                    "Base Model",
+                    select_options,
+                    value=base_default,
+                    id="lora-test-compare-base",
+                    disabled=not model_names,
+                )
+                tuned_model = lcars.select(
+                    "Tuned Model",
+                    select_options,
+                    value=chat_default,
+                    id="lora-test-chat-model",
+                    disabled=not model_names,
+                )
+                system_prompt = lcars.text_input(
+                    "Optional System Prompt",
+                    value="",
+                    placeholder="Leave blank to test what the LoRA learned by itself",
+                    autocomplete=False,
+                    id="lora-test-system",
+                    options=lcars.TextInputOptions(multiline=True, rows=2),
+                )
+                test_prompt = lcars.text_input(
+                    "Held-Out Test Prompt",
+                    value="Introduce yourself and explain how you would help me.",
+                    placeholder="Use a prompt that is not in the training file",
+                    autocomplete=False,
+                    id="lora-test-prompt",
+                    options=lcars.TextInputOptions(
+                        multiline=True,
+                        rows=3,
+                        validation=lcars.ValidationOptions(required=True),
+                    ),
+                )
+            if _is_active_action("lora-test-compare"):
+                _lora_compare_action(
+                    compare_base,
+                    tuned_model,
+                    test_prompt,
+                    system_prompt,
+                )
+
+        with lcars.data_panel(
+            "Base Response",
+            color="anakiwa",
+            id="lora-base-response-panel",
+            weight=10,
+            aspect="wide",
+            group="lora-responses",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.text(
+                STATE.lora_base_response or "Run a comparison to see the unchanged base response.",
+                size="body",
+                id="lora-base-response",
+                options=lcars.TextOptions(
+                    description=STATE.lora_base_response_meta,
+                    selectable=True,
+                    copyable=bool(STATE.lora_base_response),
+                    wrap="pre",
+                ),
+            )
+
+        with lcars.data_panel(
+            "LoRA Response",
+            color="lilac",
+            id="lora-tuned-response-panel",
+            weight=10,
+            aspect="wide",
+            group="lora-responses",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.text(
+                STATE.lora_tuned_response or "Build the adapter model, then run a comparison.",
+                size="body",
+                id="lora-tuned-response",
+                options=lcars.TextOptions(
+                    description=STATE.lora_tuned_response_meta,
+                    selectable=True,
+                    copyable=bool(STATE.lora_tuned_response),
+                    wrap="pre",
+                ),
+            )
+
+        with lcars.data_panel(
+            "Ollama Activity",
+            color="blue-bell",
+            id="lora-test-log-panel",
+            weight=12,
+            aspect="wide",
+            group="lora-compare",
+            options=COLLAPSIBLE_PANEL_OPTIONS,
+        ):
+            lcars.log(
+                LOG_OLLAMA,
+                max_lines=500,
+                title="Ollama Build And Test Output",
+                id="lora-test-log",
+                options=LOG_VIEW_OPTIONS,
+            )
 
 
 def _command_page() -> None:
@@ -1727,7 +2720,7 @@ def _setup_default_rows() -> list[dict[str, str]]:
             "base_model",
             "Required",
             "None",
-            "NousResearch/Llama-3.2-1B",
+            "unsloth/Llama-3.2-1B-Instruct",
             "HF model id or local Transformers directory",
         ),
         (
@@ -2424,6 +3417,243 @@ def _ollama_rule_rows() -> list[dict[str, str]]:
     ]
 
 
+def _lora_journey_rows(
+    cfg: dict[str, Any],
+    dataset: DatasetReport,
+    has_artifact: bool,
+) -> list[dict[str, str]]:
+    setup_ready = bool(
+        str(cfg.get("base_model") or "").strip()
+        and str(cfg.get("adapter") or "") in {"lora", "qlora"}
+        and str(cfg.get("output_dir") or "").strip()
+    )
+    training_ready = (
+        dataset.ready
+        and STATE.runner.axolotl_path is not None
+        and not any(issue.severity == "error" for issue in STATE.preflight_issues)
+    )
+    test_ready = has_artifact and bool(STATE.ollama.models)
+    return [
+        {
+            "Step": "1 · Setup",
+            "Status": "READY" if setup_ready else "START HERE",
+            "What happens": "Choose a goal, base model, and memory profile",
+            "Page": "?page=lora-setup",
+        },
+        {
+            "Step": "2 · Data",
+            "Status": "READY" if dataset.ready else "NEEDS EXAMPLES",
+            "What happens": "Write and validate the ideal conversations to imitate",
+            "Page": "?page=lora-data",
+        },
+        {
+            "Step": "3 · Train",
+            "Status": "READY" if training_ready else "WAITING",
+            "What happens": "Run preflight, preprocess, train, and watch resources",
+            "Page": "?page=lora-train",
+        },
+        {
+            "Step": "4 · Test",
+            "Status": "READY" if test_ready else "WAITING",
+            "What happens": "Build an Ollama adapter model and compare responses",
+            "Page": "?page=lora-test",
+        },
+    ]
+
+
+def _lora_training_plan_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
+    micro_batch = _bounded_int(
+        str(cfg.get("micro_batch_size") or 1),
+        default=1,
+        minimum=1,
+        maximum=1_000_000,
+    )
+    accumulation = _bounded_int(
+        str(cfg.get("gradient_accumulation_steps") or 1),
+        default=1,
+        minimum=1,
+        maximum=1_000_000,
+    )
+    adapter = str(cfg.get("adapter") or "unset")
+    memory = (
+        "4-bit base (QLoRA)"
+        if cfg.get("load_in_4bit")
+        else ("8-bit base (LoRA)" if cfg.get("load_in_8bit") else "full-precision base")
+    )
+    return [
+        {
+            "Choice": "Base model",
+            "Value": str(cfg.get("base_model") or "not chosen"),
+            "Why": "The general model whose behavior the adapter changes",
+        },
+        {
+            "Choice": "Goal layer",
+            "Value": adapter.upper(),
+            "Why": "Saves only a small adapter instead of another full model",
+        },
+        {
+            "Choice": "Training data",
+            "Value": str(_config_path_value(cfg, "datasets.0.path") or "not chosen"),
+            "Why": "Examples of the exact behavior to imitate",
+        },
+        {
+            "Choice": "Memory mode",
+            "Value": memory,
+            "Why": "Controls how the base model is loaded on the GPU",
+        },
+        {
+            "Choice": "Context",
+            "Value": f"{cfg.get('sequence_len') or 0} tokens",
+            "Why": "Maximum training-example length",
+        },
+        {
+            "Choice": "Effective batch",
+            "Value": f"{micro_batch * accumulation} examples",
+            "Why": f"{micro_batch} at once × {accumulation} accumulation steps per GPU",
+        },
+        {
+            "Choice": "Duration",
+            "Value": f"{cfg.get('num_epochs') or 0} pass(es) through the data",
+            "Why": "A small first run helps reveal data and memory problems",
+        },
+        {
+            "Choice": "Output",
+            "Value": str(cfg.get("output_dir") or "not chosen"),
+            "Why": "Where checkpoints and the final adapter are written",
+        },
+    ]
+
+
+def _lora_training_brief_rows(
+    cfg: dict[str, Any],
+    dataset: DatasetReport,
+) -> list[dict[str, str]]:
+    examples = (
+        "Hub dataset"
+        if dataset.example_count is None
+        else f"{dataset.example_count} local example(s)"
+    )
+    return [
+        {
+            "Check": "Method",
+            "Value": str(cfg.get("adapter") or "unset").upper(),
+        },
+        {
+            "Check": "Data",
+            "Value": examples,
+        },
+        {
+            "Check": "Epochs",
+            "Value": str(cfg.get("num_epochs") or "unset"),
+        },
+        {
+            "Check": "Output",
+            "Value": str(cfg.get("output_dir") or "unset"),
+        },
+    ]
+
+
+def _lora_dataset_issue_rows(report: DatasetReport) -> list[dict[str, str]]:
+    rows = [
+        {"Level": "ERROR", "Detail": detail}
+        for detail in report.errors
+    ]
+    rows.extend({"Level": "ADVICE", "Detail": detail} for detail in report.warnings)
+    if not rows:
+        rows.append(
+            {
+                "Level": "OK",
+                "Detail": "The configured dataset has valid structure and no draft placeholders.",
+            }
+        )
+    return rows
+
+
+def _lora_gate_detail(errors: list[PreflightIssue], dataset: DatasetReport) -> str:
+    if not dataset.ready:
+        if dataset.errors:
+            return dataset.errors[0]
+        if dataset.placeholder_count:
+            return "Replace every EDIT ME placeholder first."
+        return "Finish the training dataset first."
+    if errors:
+        return errors[0].detail
+    if STATE.workflow.is_active:
+        return "Another workflow currently owns the active config."
+    return "Dataset and Axolotl preflight are ready."
+
+
+def _lora_elapsed_text() -> str:
+    started = STATE.runner.state.started_at
+    if started is None:
+        return "—"
+    ended = STATE.runner.state.ended_at
+    seconds = max(0, int((ended if ended is not None else time.time()) - started))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+
+
+def _lora_process_progress() -> float:
+    if STATE.runner.is_running():
+        return 50.0
+    if STATE.runner.state.status == "complete":
+        return 100.0
+    return 0.0
+
+
+def _lora_artifact_rows(artifacts: list[Any]) -> list[dict[str, str]]:
+    if not artifacts:
+        return [
+            {
+                "State": "No adapter yet",
+                "Path": "",
+                "Size": "",
+                "Modified": "",
+                "Base Model": "",
+            }
+        ]
+    return [
+        {
+            "State": "Ready for testing",
+            "Path": str(artifact.path),
+            "Size": format_bytes(artifact.size_bytes),
+            "Modified": artifact.modified_text,
+            "Base Model": artifact.base_model or "not recorded",
+        }
+        for artifact in artifacts
+    ]
+
+
+def _lora_ollama_select_options(names: list[str]) -> list[lcars.SelectOption]:
+    if not names:
+        return [
+            lcars.SelectOption(
+                label="No local Ollama models detected",
+                value="",
+                description="Start Ollama and install a matching base model.",
+            )
+        ]
+    return [
+        lcars.SelectOption(
+            label="Choose model explicitly",
+            value="",
+        ),
+        *[lcars.SelectOption(label=name, value=name) for name in names],
+    ]
+
+
+def _lora_architecture_hint(base_model: str) -> str:
+    lowered = base_model.lower()
+    if "llama" in lowered:
+        return "Llama family"
+    if "mistral" in lowered or "mixtral" in lowered:
+        return "Mistral family"
+    if "gemma" in lowered:
+        return "Gemma family"
+    return "Check Ollama support before importing"
+
+
 def _render_config_fields(
     groups: set[str] | None = None,
     *,
@@ -2694,6 +3924,7 @@ def _duplicate_config_action() -> None:
 def _run_preflight_action() -> None:
     issues = STATE.refresh_preflight()
     _update_preflight_widgets(issues)
+    _update_lora_widgets()
     errors = sum(1 for issue in issues if issue.severity == "error")
     warnings = sum(1 for issue in issues if issue.severity == "warn")
     if errors:
@@ -2942,6 +4173,277 @@ def _stop_axolotl_action() -> None:
     _update_workflow_widgets()
 
 
+def _lora_setup_action(
+    project_name: str,
+    goal: str,
+    base_model: str,
+    memory_profile: str,
+) -> None:
+    if _workflow_blocks_config_change():
+        return
+    try:
+        slug = normalize_project_name(project_name)
+        if goal not in LORA_GOALS:
+            raise LoraStudioError("Choose a guided LoRA goal.")
+        if not base_model.strip():
+            raise LoraStudioError("Choose a base model.")
+        config_name = (
+            STATE.config_store.active_name
+            if Path(STATE.config_store.active_name).stem == slug
+            else f"{slug}.yml"
+        )
+        created = False
+        if STATE.config_store.active_name != config_name:
+            if config_name in STATE.config_store.list_configs():
+                raise LoraStudioError(
+                    f"{config_name} already exists. Switch to it on the Config page or "
+                    "choose a new project name."
+                )
+            STATE.config_store.create_named(config_name)
+            created = True
+        STATE.config_store.apply_updates(
+            beginner_config_updates(
+                slug,
+                base_model=base_model,
+                memory_profile=memory_profile,
+            )
+        )
+        _set_widget_value("lora-project-name", slug)
+        _set_session_value("lora-goal", goal)
+        _set_session_value("lora-base-model", base_model)
+        _set_session_value("lora-memory-profile", memory_profile)
+        _set_widget_value("lora-data-filename", f"{slug}.jsonl")
+        _set_widget_value("lora-test-model-name", f"{slug}-lora")
+        current_editor = _widget_value("lora-data-editor")
+        if created or not current_editor.strip() or _lora_editor_is_generated_template(
+            current_editor,
+            project_name,
+        ):
+            _set_widget_value(
+                "lora-data-editor",
+                starter_dataset_template(goal, slug.replace("-", " ").title()),
+            )
+        _update_config_widgets()
+        issues = STATE.refresh_preflight()
+        _update_preflight_widgets(issues)
+        _update_lora_widgets()
+        lcars.notify(
+            f"Guided project {slug} saved. Next, replace the EDIT ME examples on the Data page."
+        )
+    except Exception as exc:
+        lcars.notify(f"Could not save guided LoRA setup: {exc}", level="error")
+
+
+def _lora_save_dataset_action(filename: str, editor_text: str) -> None:
+    if _workflow_blocks_config_change():
+        return
+    try:
+        target, draft_report = save_chat_jsonl(
+            PROJECT_ROOT,
+            filename.strip(),
+            editor_text,
+        )
+        STATE.config_store.apply_updates(
+            {
+                "datasets.0.path": f"./data/{target.name}",
+                "datasets.0.type": "chat_template",
+                "datasets.0.ds_type": "json",
+                "datasets.0.field_messages": "messages",
+                "datasets.0.chat_template": "tokenizer_default",
+                "datasets.0.train_on_eos": "turn",
+            }
+        )
+        _set_session_value("lora-data-filename", target.name)
+        _set_session_value("lora-data-editor", editor_text)
+        _update_config_widgets()
+        issues = STATE.refresh_preflight()
+        _update_preflight_widgets(issues)
+        _update_lora_widgets()
+        if draft_report.placeholder_count:
+            lcars.notify(
+                f"Saved {draft_report.example_count} example(s) as a draft. Replace "
+                f"{draft_report.placeholder_count} placeholder(s) before training."
+            )
+        else:
+            lcars.notify(
+                f"Dataset saved and configured: {draft_report.example_count} example(s)."
+            )
+    except Exception as exc:
+        lcars.notify(f"Dataset was not saved: {exc}", level="error")
+
+
+def _lora_reset_dataset_template_action(goal: str, project_name: str) -> None:
+    chosen_goal = goal if goal in LORA_GOALS else LORA_GOALS[0]
+    try:
+        display_name = normalize_project_name(project_name).replace("-", " ").title()
+    except LoraStudioError:
+        display_name = "The Assistant"
+    template = starter_dataset_template(chosen_goal, display_name)
+    _set_widget_value("lora-data-editor", template)
+    report = inspect_jsonl_text(template)
+    lcars.update(
+        "lora-data-checks-table",
+        **_table_payload(_lora_dataset_issue_rows(report)),
+    )
+    lcars.notify("Loaded a fresh draft template. Replace every EDIT ME response before saving.")
+
+
+def _lora_validate_dataset_action() -> None:
+    report = inspect_configured_dataset(PROJECT_ROOT, _load_config_or_empty())
+    _update_lora_widgets()
+    if report.ready:
+        lcars.notify(
+            "Dataset structure is ready. Quality still depends on the examples you wrote."
+        )
+    else:
+        detail = (
+            report.errors[0]
+            if report.errors
+            else f"{report.placeholder_count} placeholder(s) remain."
+        )
+        lcars.notify(f"Dataset needs attention: {detail}", level="error")
+
+
+def _lora_start_action(action: str) -> None:
+    dataset = inspect_configured_dataset(PROJECT_ROOT, _load_config_or_empty())
+    if not dataset.ready:
+        lcars.notify(
+            f"Training is blocked until the dataset is ready: {_lora_gate_detail([], dataset)}",
+            level="error",
+        )
+        return
+    _start_axolotl_action(action)
+    _update_lora_widgets()
+
+
+def _lora_build_ollama_action(
+    base_model: str,
+    adapter_path: str,
+    model_name: str,
+) -> None:
+    cfg = _load_config_or_empty()
+    try:
+        created = STATE.ollama.create_adapter_model(
+            project_root=PROJECT_ROOT,
+            model_name=model_name,
+            base_model=base_model,
+            adapter_path=adapter_path,
+        )
+        _set_session_value("lora-test-base-model", base_model)
+        _set_widget_value("lora-test-chat-model", created.name)
+        _set_widget_value("lora-test-compare-base", base_model)
+        _set_widget_value("lora-test-model-name", model_name.strip())
+        _update_lora_ollama_selects(
+            preferred_base=base_model,
+            preferred_tuned=created.name,
+        )
+        _update_lora_widgets()
+        if str(cfg.get("adapter") or "") == "qlora":
+            lcars.notify(
+                f"Built {created.name}. This came from a QLoRA run; compare carefully because "
+                "Ollama recommends non-quantized adapters for the smoothest import."
+            )
+        else:
+            lcars.notify(f"Ollama test model ready: {created.name}.")
+    except Exception as exc:
+        lcars.notify(f"Could not build the Ollama adapter model: {exc}", level="error")
+    finally:
+        _append_ollama_logs()
+
+
+def _lora_refresh_ollama_action() -> None:
+    STATE.ollama.refresh()
+    base = suggested_ollama_model(
+        str(_load_config_or_empty().get("base_model") or ""),
+        [model.name for model in STATE.ollama.models],
+    )
+    _update_lora_ollama_selects(preferred_base=base)
+    _update_lora_widgets()
+    if STATE.ollama.last_error:
+        lcars.notify(STATE.ollama.last_error, level="error")
+    else:
+        lcars.notify(f"Detected {len(STATE.ollama.models)} local Ollama model(s).")
+
+
+def _lora_compare_action(
+    base_model: str,
+    tuned_model: str,
+    prompt: str,
+    system_prompt: str,
+) -> None:
+    if not base_model.strip() or not tuned_model.strip():
+        lcars.notify("Choose both a base model and a tuned model.", level="error")
+        return
+    if base_model.strip() == tuned_model.strip():
+        lcars.notify(
+            "Choose two different models so the comparison can reveal the adapter's effect.",
+            level="error",
+        )
+        return
+    try:
+        base_result = STATE.ollama.chat(
+            base_model,
+            prompt,
+            system_prompt=system_prompt,
+            temperature=0.2,
+        )
+        STATE.lora_base_response = base_result.content
+        STATE.lora_base_response_meta = _lora_chat_meta(base_result)
+        tuned_result = STATE.ollama.chat(
+            tuned_model,
+            prompt,
+            system_prompt=system_prompt,
+            temperature=0.2,
+        )
+        STATE.lora_tuned_response = tuned_result.content
+        STATE.lora_tuned_response_meta = _lora_chat_meta(tuned_result)
+        lcars.update(
+            "lora-base-response",
+            content=STATE.lora_base_response,
+            options=lcars.TextOptions(
+                description=STATE.lora_base_response_meta,
+                selectable=True,
+                copyable=True,
+                wrap="pre",
+            ).model_dump(mode="json"),
+        )
+        lcars.update(
+            "lora-tuned-response",
+            content=STATE.lora_tuned_response,
+            options=lcars.TextOptions(
+                description=STATE.lora_tuned_response_meta,
+                selectable=True,
+                copyable=True,
+                wrap="pre",
+            ).model_dump(mode="json"),
+        )
+        lcars.notify(
+            "Comparison complete. Look for the target behavior on prompts that were not trained."
+        )
+    except Exception as exc:
+        lcars.notify(f"Ollama comparison failed: {exc}", level="error")
+    finally:
+        _append_ollama_logs()
+
+
+def _lora_chat_meta(result: Any) -> str:
+    speed = result.tokens_per_second
+    speed_text = f" · {speed:.1f} token/s" if speed is not None else ""
+    return f"{result.model} · {result.eval_count} generated token(s){speed_text}"
+
+
+def _lora_editor_is_generated_template(text: str, project_name: str) -> bool:
+    try:
+        display_name = normalize_project_name(project_name).replace("-", " ").title()
+    except LoraStudioError:
+        display_name = project_name.strip() or "The Assistant"
+    candidate = text.strip()
+    return any(
+        candidate == starter_dataset_template(goal, display_name).strip()
+        for goal in LORA_GOALS
+    )
+
+
 def _setup_apply_recipe_action(recipe: str) -> None:
     if _workflow_blocks_config_change():
         return
@@ -3181,6 +4683,13 @@ def _ollama_refresh_action() -> None:
         "ollama-table",
         **_table_payload(STATE.ollama.rows(), copy_columns={"Model", "Source"}),
     )
+    _update_lora_ollama_selects(
+        preferred_base=suggested_ollama_model(
+            str(_load_config_or_empty().get("base_model") or ""),
+            [model.name for model in STATE.ollama.models],
+        )
+    )
+    _update_lora_widgets()
     if STATE.ollama.last_error:
         lcars.notify(STATE.ollama.last_error, level="error")
     else:
@@ -3284,9 +4793,11 @@ def live_tick() -> None:
     )
     command = " ".join(STATE.runner.state.command) if STATE.runner.state.command else "idle"
     lcars.update("run-command-text", content=command[:500])
+    _update_lora_live_widgets(snapshot)
     _update_workflow_widgets()
     _append_runner_logs()
     _append_hf_logs()
+    _append_ollama_logs()
     _update_cache_widgets(live=True)
 
 
@@ -3300,6 +4811,12 @@ def _append_hf_logs() -> None:
     lines = STATE.hf.drain_logs()
     if lines:
         lcars.append_log(LOG_HF, *lines)
+
+
+def _append_ollama_logs() -> None:
+    lines = STATE.ollama.drain_logs()
+    if lines:
+        lcars.append_log(LOG_OLLAMA, *lines)
 
 
 def _update_preflight_widgets(issues: list[PreflightIssue]) -> None:
@@ -3332,11 +4849,33 @@ def _update_config_widgets() -> None:
             lcars.SelectOption(label=name, value=name).model_dump(mode="json") for name in configs
         ],
     )
+    active_cfg = _load_config_or_empty()
+    active_base = str(active_cfg.get("base_model") or LORA_BASE_MODEL_VALUES[0])
+    base_options = [
+        lcars.SelectOption(label=label, value=value) for label, value in LORA_BASE_MODELS
+    ]
+    if active_base not in LORA_BASE_MODEL_VALUES:
+        base_options.insert(
+            0,
+            lcars.SelectOption(
+                label=f"{active_base} · current custom model",
+                value=active_base,
+            ),
+        )
+    project_name = Path(STATE.config_store.active_name).stem
+    store = get_session_state(get_ctx().session_id)
+    store["lora-project-name"] = project_name
+    store["lora-base-model"] = active_base
+    lcars.update("lora-project-name", value=project_name)
+    lcars.update(
+        "lora-base-model",
+        value=active_base,
+        options=[option.model_dump(mode="json") for option in base_options],
+    )
     try:
         values = STATE.config_store.editor_values()
     except Exception:
         return
-    store = get_session_state(get_ctx().session_id)
     store["active-config-select"] = STATE.config_store.active_name
     for spec in FIELD_SPECS:
         widget_id = spec.widget_id
@@ -3359,6 +4898,229 @@ def _update_config_widgets() -> None:
         "setup-defaults-table",
         **_table_payload(_setup_default_rows(), copy_columns={"Field"}),
     )
+
+
+def _update_lora_widgets() -> None:
+    cfg = _load_config_or_empty()
+    dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
+    errors = [issue for issue in STATE.preflight_issues if issue.severity == "error"]
+    steps = _lora_journey_rows(cfg, dataset, bool(artifacts))
+    completed = sum(1 for row in steps if row["Status"] == "READY")
+    can_train = (
+        not errors
+        and dataset.ready
+        and not STATE.workflow.is_active
+        and not STATE.runner.is_running()
+    )
+
+    lcars.update("lora-home-progress", value=completed / len(steps) * 100)
+    lcars.update("lora-journey-table", **_table_payload(steps))
+    plan_payload = _table_payload(
+        _lora_training_plan_rows(cfg),
+        copy_columns={"Value"},
+    )
+    lcars.update("lora-setup-plan-table", **plan_payload)
+    lcars.update(
+        "lora-train-plan-table",
+        **_table_payload(_lora_training_brief_rows(cfg, dataset)),
+    )
+    lcars.update(
+        "lora-data-status",
+        value=dataset.status,
+        status="ok" if dataset.ready else ("crit" if dataset.errors else "warn"),
+        options=lcars.MetricOptions(
+            secondary_value=dataset.source or "No source"
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-data-example-count",
+        value="REMOTE" if dataset.example_count is None else str(dataset.example_count),
+        status=(
+            "ok"
+            if dataset.example_count is None or dataset.example_count >= 20
+            else "warn"
+        ),
+        options=lcars.MetricOptions(
+            secondary_value=f"{dataset.message_count} chat messages"
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-data-placeholder-count",
+        value=str(dataset.placeholder_count),
+        status="warn" if dataset.placeholder_count else "ok",
+    )
+    lcars.update(
+        "lora-data-checks-table",
+        **_table_payload(_lora_dataset_issue_rows(dataset)),
+    )
+    lcars.update(
+        "lora-train-gate",
+        value="READY" if can_train else "BLOCKED",
+        status="ok" if can_train else "crit",
+        options=lcars.MetricOptions(
+            secondary_value=_lora_gate_detail(errors, dataset)
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-train-data-status",
+        value=dataset.status,
+        status="ok" if dataset.ready else "warn",
+        options=lcars.MetricOptions(
+            secondary_value=(
+                "remote"
+                if dataset.example_count is None
+                else f"{dataset.example_count} examples"
+            )
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-artifacts-table",
+        **_table_payload(
+            _lora_artifact_rows(artifacts),
+            copy_columns={"Path", "Base Model"},
+        ),
+    )
+    lcars.update(
+        "lora-train-preprocess",
+        disabled=not dataset.ready or STATE.runner.is_running(),
+    )
+    lcars.update("lora-train-start", disabled=not can_train)
+    lcars.update("lora-train-stop", disabled=not STATE.runner.is_running())
+
+    trained_base = str(cfg.get("base_model") or "")
+    adapter_default = str(artifacts[0].path) if artifacts else str(cfg.get("output_dir") or "")
+    lcars.update(
+        "lora-test-adapter-status",
+        value="FOUND" if artifacts else "NOT FOUND",
+        status="ok" if artifacts else "warn",
+        options=lcars.MetricOptions(
+            secondary_value=adapter_default or "Finish training first"
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-test-compatibility-table",
+        **_table_payload(
+            [
+                {
+                    "Requirement": "Exact base",
+                    "Your training value": trained_base,
+                    "Why": "A different Ollama base can produce erratic behavior",
+                },
+                {
+                    "Requirement": "Adapter format",
+                    "Your training value": (
+                        "Safetensors detected" if artifacts else "Not detected"
+                    ),
+                    "Why": "Ollama imports the PEFT adapter directory",
+                },
+                {
+                    "Requirement": "Architecture",
+                    "Your training value": _lora_architecture_hint(trained_base),
+                    "Why": "Ollama documents adapter import for Llama, Mistral, and Gemma",
+                },
+            ],
+            copy_columns={"Your training value"},
+        ),
+    )
+    lcars.update(
+        "lora-test-ollama-status",
+        value="READY" if STATE.ollama.models else "NOT CONNECTED",
+        status="ok" if STATE.ollama.models else "crit",
+        options=lcars.MetricOptions(
+            secondary_value=(
+                f"{len(STATE.ollama.models)} local model(s)"
+                if STATE.ollama.models
+                else STATE.ollama.last_error or "No local models detected"
+            )
+        ).model_dump(mode="json"),
+    )
+
+
+def _update_lora_ollama_selects(
+    *,
+    preferred_base: str = "",
+    preferred_tuned: str = "",
+) -> None:
+    names = [model.name for model in STATE.ollama.models]
+    serialized = [
+        option.model_dump(mode="json") for option in _lora_ollama_select_options(names)
+    ]
+    preferences = {
+        "lora-test-base-model": preferred_base,
+        "lora-test-compare-base": preferred_base,
+        "lora-test-chat-model": preferred_tuned,
+    }
+    for widget_id, preferred in preferences.items():
+        current = _widget_value(widget_id)
+        selected = current if current in names else ""
+        if preferred in names:
+            selected = preferred
+        _set_session_value(widget_id, selected)
+        lcars.update(widget_id, value=selected, options=serialized, disabled=not names)
+    lcars.update(
+        "ollama-table",
+        **_table_payload(
+            STATE.ollama.rows(),
+            copy_columns={"Model", "Source"},
+        ),
+    )
+
+
+def _update_lora_live_widgets(snapshot: Any) -> None:
+    gpu = snapshot.gpus[0] if snapshot.gpus else None
+    lcars.update(
+        "lora-train-status",
+        value=STATE.runner.status_label(),
+        status=STATE.runner.status_severity(),
+    )
+    lcars.update("lora-train-elapsed", value=_lora_elapsed_text())
+    lcars.update(
+        "lora-train-gpu",
+        value=f"{gpu.utilization:.0f}%" if gpu is not None else "NOT DETECTED",
+        status=_percent_status(gpu.utilization) if gpu is not None else "warn",
+        options=lcars.MetricOptions(
+            secondary_value=(
+                f"{format_bytes(gpu.memory_used)} / {format_bytes(gpu.memory_total)}"
+                if gpu is not None
+                else "training may be unavailable or CPU-only"
+            )
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-train-ram",
+        value=f"{snapshot.ram_percent:.0f}%",
+        status=_percent_status(snapshot.ram_percent),
+        options=lcars.MetricOptions(
+            secondary_value=(
+                f"{format_bytes(snapshot.ram_used)} / {format_bytes(snapshot.ram_total)}"
+            )
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "lora-train-progress",
+        value=_lora_process_progress(),
+        options=lcars.MeterOptions(
+            unit="%",
+            indeterminate=STATE.runner.is_running(),
+            description="Axolotl's detailed step and loss output appears in the log below.",
+        ).model_dump(mode="json"),
+    )
+    lcars.update("lora-train-stop", disabled=not STATE.runner.is_running())
+    if STATE.resource_tick % 5 == 0:
+        artifacts = discover_adapter_artifacts(PROJECT_ROOT, _load_config_or_empty())
+        lcars.update(
+            "lora-artifacts-table",
+            **_table_payload(
+                _lora_artifact_rows(artifacts),
+                copy_columns={"Path", "Base Model"},
+            ),
+        )
+        lcars.update(
+            "lora-test-adapter-status",
+            value="FOUND" if artifacts else "NOT FOUND",
+            status="ok" if artifacts else "warn",
+        )
 
 
 def _update_hf_widgets() -> None:

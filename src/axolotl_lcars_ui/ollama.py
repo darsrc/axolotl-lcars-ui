@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -29,14 +32,34 @@ class OllamaModel:
     next_step: str = ""
 
 
+@dataclass(frozen=True)
+class OllamaChatResult:
+    """One non-streaming response with the useful generation counters."""
+
+    model: str
+    content: str
+    eval_count: int = 0
+    eval_duration: int = 0
+    total_duration: int = 0
+
+    @property
+    def tokens_per_second(self) -> float | None:
+        duration = self.eval_duration or self.total_duration
+        if self.eval_count <= 0 or duration <= 0:
+            return None
+        seconds = duration / 1_000_000_000
+        return self.eval_count / seconds if seconds > 0 else None
+
+
 class OllamaManager:
-    """Reads the local Ollama API without taking a dependency on the ollama CLI."""
+    """Uses the local API, plus the CLI for Modelfile-based adapter creation."""
 
     def __init__(self, host: str = "http://127.0.0.1:11434") -> None:
         self.host = host.rstrip("/")
         self.models: list[OllamaModel] = []
         self.last_error = ""
         self.selected: OllamaModel | None = None
+        self.logs: deque[str] = deque(maxlen=500)
 
     def refresh(self) -> list[OllamaModel]:
         self.last_error = ""
@@ -68,7 +91,9 @@ class OllamaManager:
         if not self.models:
             self.refresh()
         for model in self.models:
-            if model.name == name:
+            if model.name == name or (
+                ":" not in name and model.name == f"{name}:latest"
+            ):
                 self.selected = model
                 return model
         self.selected = None
@@ -94,6 +119,154 @@ class OllamaManager:
             for model in self.models
         ]
 
+    def create_adapter_model(
+        self,
+        *,
+        project_root: Path,
+        model_name: str,
+        base_model: str,
+        adapter_path: str,
+        system_prompt: str = "",
+        timeout: float = 600.0,
+    ) -> OllamaModel:
+        """Create a local Ollama model from an Axolotl Safetensors adapter."""
+
+        clean_name = model_name.strip()
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?",
+            clean_name,
+        ):
+            raise RuntimeError(
+                "Ollama model names may contain letters, numbers, dots, dashes, slashes, "
+                "and one optional :tag."
+            )
+        if self.select(clean_name) is not None:
+            raise RuntimeError(
+                f"An Ollama model named {clean_name} already exists. Choose a new test-model name."
+            )
+        clean_base = base_model.strip()
+        if not clean_base:
+            raise RuntimeError("Choose the installed Ollama base model used for this adapter.")
+        if not any(model.name == clean_base for model in self.models):
+            self.refresh()
+        if not any(model.name == clean_base for model in self.models):
+            raise RuntimeError(f"The Ollama base model is not installed: {clean_base}")
+
+        adapter = Path(adapter_path).expanduser()
+        if not adapter.is_absolute():
+            adapter = project_root / adapter
+        adapter = adapter.resolve()
+        if not adapter.is_dir():
+            raise RuntimeError(f"Adapter directory does not exist: {adapter}")
+        if not (adapter / "adapter_config.json").is_file():
+            raise RuntimeError(f"Missing adapter_config.json in {adapter}")
+        if not (adapter / "adapter_model.safetensors").is_file():
+            raise RuntimeError(f"Missing adapter_model.safetensors in {adapter}")
+
+        binary = shutil.which("ollama")
+        if binary is None:
+            raise RuntimeError("The ollama CLI is not on PATH.")
+        if '"""' in system_prompt:
+            raise RuntimeError('The system prompt cannot contain a triple quote sequence (""").')
+
+        safe_directory = re.sub(r"[^A-Za-z0-9._-]+", "-", clean_name).strip("-")
+        build_dir = project_root / ".lora-studio" / "ollama" / safe_directory
+        build_dir.mkdir(parents=True, exist_ok=True)
+        modelfile = build_dir / "Modelfile"
+        lines = [
+            f"FROM {clean_base}",
+            f"ADAPTER {json.dumps(str(adapter))}",
+        ]
+        if system_prompt.strip():
+            lines.append(f'SYSTEM """{system_prompt.strip()}"""')
+        modelfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        command = [binary, "create", clean_name, "-f", str(modelfile)]
+        self.logs.append(f"[OLLAMA] creating {clean_name} from {clean_base}")
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=project_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"Ollama model creation failed: {exc}") from exc
+        for line in [*completed.stdout.splitlines(), *completed.stderr.splitlines()]:
+            if line.strip():
+                self.logs.append(f"[OLLAMA] {line.strip()}")
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(detail or f"ollama create exited with code {completed.returncode}")
+
+        self.refresh()
+        created = self.select(clean_name)
+        if created is None:
+            raise RuntimeError(
+                f"Ollama reported success, but {clean_name} was not found after refresh."
+            )
+        self.logs.append(f"[OLLAMA] model ready: {clean_name}")
+        return created
+
+    def chat(
+        self,
+        model_name: str,
+        prompt: str,
+        *,
+        system_prompt: str = "",
+        temperature: float = 0.7,
+        timeout: float = 300.0,
+    ) -> OllamaChatResult:
+        """Run one non-streaming local Ollama chat turn."""
+
+        clean_model = model_name.strip()
+        clean_prompt = prompt.strip()
+        if not clean_model:
+            raise RuntimeError("Choose an Ollama model.")
+        if not clean_prompt:
+            raise RuntimeError("Enter a test prompt.")
+        messages: list[dict[str, str]] = []
+        if system_prompt.strip():
+            messages.append({"role": "system", "content": system_prompt.strip()})
+        messages.append({"role": "user", "content": clean_prompt})
+        self.logs.append(f"[OLLAMA] testing {clean_model}")
+        try:
+            payload = self._json(
+                "POST",
+                "/api/chat",
+                {
+                    "model": clean_model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"temperature": max(0.0, min(2.0, float(temperature)))},
+                },
+                timeout=timeout,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Ollama test failed: {exc}") from exc
+        message = payload.get("message") or {}
+        if not isinstance(message, dict):
+            raise RuntimeError("Ollama returned an unexpected chat response.")
+        content = str(message.get("content") or "")
+        result = OllamaChatResult(
+            model=clean_model,
+            content=content,
+            eval_count=int(payload.get("eval_count") or 0),
+            eval_duration=int(payload.get("eval_duration") or 0),
+            total_duration=int(payload.get("total_duration") or 0),
+        )
+        self.logs.append(
+            f"[OLLAMA] response complete: {result.eval_count} generated token(s)"
+        )
+        return result
+
+    def drain_logs(self) -> list[str]:
+        lines = list(self.logs)
+        self.logs.clear()
+        return lines
+
     def _enrich_show(self, model: OllamaModel) -> None:
         try:
             payload = self._json("POST", "/api/show", {"model": model.name})
@@ -112,7 +285,14 @@ class OllamaManager:
         _mark_compatibility(model)
         _set_next_step(model)
 
-    def _json(self, method: str, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
+    def _json(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, object] | None = None,
+        *,
+        timeout: float = 2.0,
+    ) -> dict[str, object]:
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
             f"{self.host}{path}",
@@ -121,11 +301,20 @@ class OllamaManager:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=2.0) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8")
+            except (OSError, UnicodeError):
+                detail = ""
+            raise OSError(detail or str(exc)) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise OSError(exc) from exc
-        parsed = json.loads(raw or "{}")
+        try:
+            parsed = json.loads(raw or "{}")
+        except json.JSONDecodeError as exc:
+            raise OSError("invalid JSON returned by Ollama") from exc
         if not isinstance(parsed, dict):
             raise OSError("unexpected Ollama response")
         return parsed

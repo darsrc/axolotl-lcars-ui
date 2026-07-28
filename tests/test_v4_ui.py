@@ -56,7 +56,77 @@ class V44UiTests(unittest.TestCase):
 
     def test_project_builds_with_lcars_v44(self) -> None:
         self.assertEqual(lcars.__version__, "4.4.0")
-        self.assertEqual(len(self.manifest.pages), 13)
+        self.assertEqual(len(self.manifest.pages), 18)
+
+    def test_beginner_lora_studio_exposes_the_four_step_flow(self) -> None:
+        self.assertEqual(
+            list(self.manifest.pages)[:5],
+            ["lora", "lora-setup", "lora-data", "lora-train", "lora-test"],
+        )
+        self.assertEqual(self.manifest.pages["lora"].archetype, "grid")
+        self.assertEqual(self.manifest.pages["lora-train"].archetype, "console")
+        self.assertEqual(self.widgets["lora-home-progress"].options.segments, 4)
+
+        setup_form = self.widgets["lora-setup-form"]
+        self.assertEqual(setup_form.action_id, "lora-setup-save")
+        self.assertEqual(
+            {child.id for child in setup_form.children},
+            {
+                "lora-project-name",
+                "lora-goal",
+                "lora-base-model",
+                "lora-memory-profile",
+            },
+        )
+        data_form = self.widgets["lora-data-form"]
+        self.assertEqual(data_form.action_id, "lora-data-save")
+        self.assertEqual(
+            {child.id for child in data_form.children},
+            {"lora-data-filename", "lora-data-editor"},
+        )
+        self.assertTrue(self.widgets["lora-data-editor"].options.multiline)
+        self.assertEqual(self.widgets["lora-data-editor"].options.rows, 12)
+
+        self.assertEqual(
+            self.widgets["lora-training-log"].stream_id,
+            main.LOG_AXOLOTL,
+        )
+        self.assertTrue(self.widgets["lora-train-progress"].options.description)
+        self.assertIn(
+            "long time",
+            self.widgets["lora-train-start"].options.confirm,
+        )
+
+        build_form = self.widgets["lora-test-build-form"]
+        self.assertEqual(build_form.action_id, "lora-test-build")
+        compare_form = self.widgets["lora-test-compare-form"]
+        self.assertEqual(compare_form.action_id, "lora-test-compare")
+        self.assertEqual(
+            {child.id for child in compare_form.children},
+            {
+                "lora-test-compare-base",
+                "lora-test-chat-model",
+                "lora-test-system",
+                "lora-test-prompt",
+            },
+        )
+        self.assertEqual(self.widgets["lora-test-log"].stream_id, main.LOG_OLLAMA)
+
+    def test_guided_setup_only_replaces_an_untouched_dataset_template(self) -> None:
+        template = main.starter_dataset_template(
+            main.LORA_GOALS[0],
+            "Helpful Captain",
+        )
+
+        self.assertTrue(
+            main._lora_editor_is_generated_template(template, "helpful-captain")
+        )
+        self.assertFalse(
+            main._lora_editor_is_generated_template(
+                template.replace("[EDIT ME 1:", "My carefully edited answer:"),
+                "helpful-captain",
+            )
+        )
 
     def test_manifest_uses_v44_capabilities(self) -> None:
         run = self.manifest.pages["run"]

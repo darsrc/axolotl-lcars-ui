@@ -7,6 +7,7 @@ __pycache__/
 *.egg-info/
 src/*.egg-info/
 outputs/
+prepared/
 last_run_prepared/
 *.log
 
@@ -29,6 +30,9 @@ mlruns/
 comet/
 runs/
 checkpoints/
+.lora-studio/
+data/*.jsonl
+data/*.jsonl.bak
 *.safetensors
 *.bin
 *.pt

@@ -57,6 +57,16 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
 
 ## Current Features
 
+- Beginner-first **LoRA Studio** with a four-step Setup → Data → Train → Test journey for
+  personality, agent-behavior, and hybrid adapters. The setup wizard translates four plain
+  choices into a normal Axolotl YAML config; the JSONL editor validates chat examples, calls out
+  unfinished placeholders, and keeps a backup when a draft is overwritten.
+- Focused LoRA training gate and monitor with plain-language settings, preflight/data readiness,
+  live process/GPU/RAM state, Axolotl logs, safe start/stop controls, and automatic Safetensors
+  adapter discovery.
+- Ollama adapter packaging and held-out base-vs-LoRA comparison. The test page creates a managed
+  Modelfile, requires an explicitly selected installed base, imports the Axolotl adapter through
+  `ollama create`, and runs both models through the local Ollama chat API.
 - Structured Axolotl config editor split into Setup, Train, Hardware, and Tracking pages.
 - 484 surfaced Axolotl config keys, including advanced dataset, tokenizer, PEFT, optimizer,
   kernel, FSDP, DeepSpeed, TRL, vLLM, evaluation, and integration settings.

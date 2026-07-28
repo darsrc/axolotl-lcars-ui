@@ -20,6 +20,22 @@ The HF Hub page classifies search results before use:
 
 Downloads are filtered to compatible model or dataset file extensions so GGUF-only search results do not silently become training inputs.
 
+## Ollama Adapter Testing
+
+Ollama is used after Axolotl training, not as the Axolotl `base_model`. The guided Test page:
+
+- accepts only adapter directories containing `adapter_config.json` and
+  `adapter_model.safetensors`;
+- requires the operator to choose an installed Ollama base instead of silently substituting a
+  similar family member;
+- refuses to overwrite an existing Ollama model name; and
+- keeps the generated Modelfile under `.lora-studio/ollama/`.
+
+The selected runtime base must come from the same model lineage as the training base. A mismatched
+base can load successfully but behave erratically. Ollama currently documents Safetensors adapter
+import for Llama, Mistral/Mixtral, and Gemma families and recommends non-quantized adapters for the
+smoothest import path.
+
 ## Dataset Shape
 
 The preflight checks warn when dataset type and fields look incomplete, such as:

@@ -39,6 +39,32 @@ The UI can edit configs and manage content without Axolotl installed, but run la
 
 Install Axolotl according to the official docs for your CUDA/ROCm/Mac environment, then restart the UI.
 
+## Beginner LoRA Studio
+
+The first five navigation items form one guided workflow:
+
+1. **LoRA Studio** explains what a LoRA can and cannot teach and shows readiness for each step.
+2. **1 · Setup** asks only for a project name, goal, base model, and memory profile. It creates a
+   project YAML and fills the related adapter, optimizer, dataset, output, and safety fields.
+3. **2 · Data** provides valid chat-style JSONL with deliberately unfinished `EDIT ME` responses.
+   Write the exact ideal answers—not descriptions of them—then validate and save. An overwritten
+   dataset keeps its immediately previous version as `filename.jsonl.bak`. Guided JSONL files are
+   gitignored by default because personality data can contain private material.
+4. **3 · Train** blocks its beginner start button until the configured data passes the Studio
+   checks and Axolotl preflight. It exposes preprocessing, training, stop, live logs, GPU/RAM
+   telemetry, and generated adapter directories without requiring the full workflow editor.
+5. **4 · Test** packages a detected Safetensors adapter with a selected local Ollama base and
+   compares the same held-out prompt against the base and tuned models.
+
+A personality LoRA can teach voice, tone, boundaries, and response habits. An agent-behavior
+LoRA can teach planning, clarification, tool-call, and recovery patterns, but the runtime must
+still provide actual tools, permissions, memory, and an execution loop.
+
+For Ollama import, use the same base-model lineage used during training. The UI intentionally
+does not auto-select a merely similar model. Ollama documents Safetensors adapter import for
+Llama, Mistral/Mixtral, and Gemma families and recommends non-quantized adapters for the smoothest
+path; QLoRA remains available when VRAM is the tighter constraint.
+
 ## Setup Page
 
 The Setup page separates starter choices from raw Axolotl fields:

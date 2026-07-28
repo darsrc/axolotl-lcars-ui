@@ -714,7 +714,11 @@ class ConfigStore:
         if bundled.exists() and bundled != path:
             shutil.copyfile(bundled, path)
             return
-        path.write_text("base_model: NousResearch/Llama-3.2-1B\noutput_dir: ./outputs/lora-out\n", encoding="utf-8")
+        path.write_text(
+            "base_model: unsloth/Llama-3.2-1B-Instruct\n"
+            "output_dir: ./outputs/lora-out\n",
+            encoding="utf-8",
+        )
 
     def list_configs(self) -> list[str]:
         names = sorted(p.name for p in self.config_dir.glob("*.y*ml") if p.is_file())
@@ -1022,7 +1026,7 @@ class ConfigStore:
 
 def _starter_config() -> dict[str, Any]:
     return {
-        "base_model": "NousResearch/Llama-3.2-1B",
+        "base_model": "unsloth/Llama-3.2-1B-Instruct",
         "model_type": "AutoModelForCausalLM",
         "tokenizer_type": "AutoTokenizer",
         "adapter": "lora",

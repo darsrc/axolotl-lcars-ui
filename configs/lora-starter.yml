@@ -1,5 +1,5 @@
 # Starter Axolotl LoRA config. Edit in the LCARS structured editor or at /raw.
-base_model: NousResearch/Llama-3.2-1B
+base_model: unsloth/Llama-3.2-1B-Instruct
 model_type: AutoModelForCausalLM
 tokenizer_type: AutoTokenizer
 

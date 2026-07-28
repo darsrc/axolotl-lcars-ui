@@ -26,6 +26,19 @@ PERSISTED_WIDGET_IDS = frozenset(
         # Config manager
         "active-config-select",
         "new-config-name",
+        # Guided LoRA Studio
+        "lora-project-name",
+        "lora-goal",
+        "lora-base-model",
+        "lora-memory-profile",
+        "lora-data-filename",
+        "lora-test-base-model",
+        "lora-test-adapter-path",
+        "lora-test-model-name",
+        "lora-test-chat-model",
+        "lora-test-compare-base",
+        "lora-test-system",
+        "lora-test-prompt",
         # Setup helpers
         "setup-recipe",
         "setup-model-preset",
