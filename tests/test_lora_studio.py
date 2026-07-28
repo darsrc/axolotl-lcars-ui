@@ -8,6 +8,7 @@ from pathlib import Path
 from axolotl_lcars_ui.lora_studio import (
     DEFAULT_LORA_PRESET,
     LORA_GOALS,
+    LORA_HF_DATASET_FORMATS,
     LORA_MEMORY_PROFILES,
     LORA_MODEL_TEMPLATES,
     LORA_PRESETS,
@@ -16,6 +17,7 @@ from axolotl_lcars_ui.lora_studio import (
     beginner_config_updates,
     chat_example_line,
     discover_adapter_artifacts,
+    downloaded_dataset_config_updates,
     get_lora_model_template,
     infer_lora_preset,
     inspect_configured_dataset,
@@ -176,6 +178,57 @@ class LoraStudioTests(unittest.TestCase):
                     recommend_lora_preset(None, template.model_id),
                     template.default_preset,
                 )
+
+    def test_downloaded_dataset_formats_translate_common_hub_shapes(self) -> None:
+        self.assertEqual(
+            {dataset_format.key for dataset_format in LORA_HF_DATASET_FORMATS},
+            {"openai-messages", "sharegpt", "alpaca", "plain-text"},
+        )
+
+        openai = downloaded_dataset_config_updates(
+            "example/openai-chat",
+            "openai-messages",
+            split="train[:10%]",
+            use_top_level_chat_template=True,
+        )
+        self.assertEqual(openai["datasets.0.path"], "example/openai-chat")
+        self.assertEqual(openai["datasets.0.split"], "train[:10%]")
+        self.assertEqual(openai["datasets.0.type"], "chat_template")
+        self.assertEqual(openai["datasets.0.field_messages"], "messages")
+        self.assertIsNone(openai["datasets.0.chat_template"])
+
+        sharegpt = downloaded_dataset_config_updates(
+            "example/sharegpt",
+            "sharegpt",
+            subset="cleaned",
+        )
+        self.assertEqual(sharegpt["datasets.0.field_messages"], "conversations")
+        self.assertEqual(
+            sharegpt["datasets.0.message_property_mappings"],
+            {"role": "from", "content": "value"},
+        )
+        self.assertEqual(sharegpt["datasets.0.name"], "cleaned")
+        self.assertEqual(sharegpt["datasets.0.chat_template"], "tokenizer_default")
+
+        alpaca = downloaded_dataset_config_updates("example/alpaca", "alpaca")
+        self.assertEqual(alpaca["datasets.0.type"], "alpaca")
+        self.assertIsNone(alpaca["datasets.0.field_messages"])
+        self.assertIsNone(alpaca["datasets.0.message_property_mappings"])
+
+        plain_text = downloaded_dataset_config_updates("example/text", "plain-text")
+        self.assertEqual(plain_text["datasets.0.type"], "completion")
+        self.assertEqual(plain_text["datasets.0.field"], "text")
+
+        with self.assertRaises(LoraStudioError):
+            downloaded_dataset_config_updates("not-a-repo-id", "openai-messages")
+        with self.assertRaises(LoraStudioError):
+            downloaded_dataset_config_updates("example/data", "unknown-shape")
+        with self.assertRaises(LoraStudioError):
+            downloaded_dataset_config_updates(
+                "example/data",
+                "openai-messages",
+                split="train\nvalidation",
+            )
 
     def test_starter_template_is_valid_jsonl_but_remains_an_explicit_draft(self) -> None:
         text = starter_dataset_template(LORA_GOALS[1], "Pathfinder")

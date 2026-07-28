@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 
 from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigStore
-from axolotl_lcars_ui.lora_studio import beginner_config_updates
+from axolotl_lcars_ui.lora_studio import (
+    beginner_config_updates,
+    downloaded_dataset_config_updates,
+)
 
 
 def _spec(key: str):
@@ -115,6 +118,43 @@ class ConfigControlValueTests(unittest.TestCase):
             self.assertNotIn("lora_target_modules", legacy)
             self.assertTrue(legacy["lora_target_linear"])
             self.assertEqual(legacy["datasets"][0]["chat_template"], "tokenizer_default")
+
+    def test_downloaded_dataset_shape_replaces_stale_local_jsonl_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ConfigStore(Path(temp_dir))
+            store.apply_updates(
+                {
+                    "datasets.0.path": "./data/old.jsonl",
+                    "datasets.0.type": "completion",
+                    "datasets.0.ds_type": "json",
+                    "datasets.0.field": "old_text",
+                    "datasets.0.field_messages": "old_messages",
+                    "datasets.0.data_files": ["old.jsonl"],
+                }
+            )
+
+            store.apply_updates(
+                downloaded_dataset_config_updates(
+                    "example/downloaded-chat",
+                    "sharegpt",
+                    subset="cleaned",
+                )
+            )
+            dataset = store.load()["datasets"][0]
+
+            self.assertEqual(dataset["path"], "example/downloaded-chat")
+            self.assertEqual(dataset["type"], "chat_template")
+            self.assertEqual(dataset["split"], "train")
+            self.assertEqual(dataset["name"], "cleaned")
+            self.assertEqual(dataset["field_messages"], "conversations")
+            self.assertEqual(
+                dataset["message_property_mappings"],
+                {"role": "from", "content": "value"},
+            )
+            self.assertEqual(dataset["roles_to_train"], ["assistant"])
+            self.assertNotIn("ds_type", dataset)
+            self.assertNotIn("field", dataset)
+            self.assertNotIn("data_files", dataset)
 
 
 if __name__ == "__main__":

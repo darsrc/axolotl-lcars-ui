@@ -577,6 +577,80 @@ class HuggingFaceManager:
             )
         return rows, info.size_on_disk_str, int(info.size_on_disk)
 
+    def dataset_cache_rows(self) -> list[dict[str, str]]:
+        """Return ready datasets plus cache entries left by interrupted downloads.
+
+        ``scan_cache_dir`` deliberately omits repositories whose snapshot metadata is
+        incomplete. That is correct for consumers that need a usable snapshot, but it
+        made an interrupted dataset download disappear from the LoRA Data page. Keep
+        the official scan authoritative for READY rows and add clearly non-selectable
+        INCOMPLETE rows from the standard Hub cache layout.
+        """
+
+        rows, _, _ = self.cache_rows()
+        datasets = [
+            {
+                **row,
+                "Status": "READY",
+                "Problem": "",
+            }
+            for row in rows
+            if str(row.get("Type") or "").strip().casefold()
+            in {"dataset", "datasets"}
+            and str(row.get("Repo") or "").strip()
+        ]
+        indexed_paths = {
+            _normalized_cache_path(row.get("Path", ""))
+            for row in datasets
+            if row.get("Path")
+        }
+        cache_dir = _cache_dir()
+        try:
+            candidates = sorted(cache_dir.glob("datasets--*"))
+        except OSError as exc:
+            self.log(f"HF dataset cache discovery failed: {exc}")
+            return datasets
+
+        for repo_path in candidates:
+            if not repo_path.is_dir():
+                continue
+            normalized_path = _normalized_cache_path(repo_path)
+            if normalized_path in indexed_paths:
+                continue
+            repo_id = _repo_id_from_cache_path(repo_path, "dataset")
+            if not repo_id:
+                continue
+            size_bytes, file_count = _cache_directory_stats(repo_path)
+            snapshots = repo_path / "snapshots"
+            problem = (
+                "No completed snapshot exists. Download this dataset again from HF Hub."
+                if not snapshots.is_dir()
+                else (
+                    "The snapshot is incomplete or unreadable. Download this dataset "
+                    "again from HF Hub."
+                )
+            )
+            datasets.append(
+                {
+                    "Type": "dataset",
+                    "Repo": repo_id,
+                    "Status": "INCOMPLETE",
+                    "Size": format_bytes(size_bytes),
+                    "Files": str(file_count),
+                    "Revision": _cache_ref_revision(repo_path),
+                    "Path": str(repo_path),
+                    "Problem": problem,
+                }
+            )
+
+        return sorted(
+            datasets,
+            key=lambda row: (
+                row.get("Status") != "READY",
+                str(row.get("Repo") or "").casefold(),
+            ),
+        )
+
     def delete_repo(self, repo_id: str, repo_type: RepoType) -> str:
         repo_id = repo_id.strip()
         if not repo_id:
@@ -1049,6 +1123,59 @@ def _cache_dir() -> Path:
     path = Path(raw).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _normalized_cache_path(value: str | Path) -> str:
+    try:
+        return str(Path(value).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError):
+        return str(Path(value).expanduser().absolute())
+
+
+def _repo_id_from_cache_path(path: Path, repo_type: RepoType) -> str:
+    prefix = f"{repo_type}s--"
+    if not path.name.startswith(prefix):
+        return ""
+    encoded = path.name[len(prefix) :]
+    namespace, separator, name = encoded.partition("--")
+    if not separator or not namespace or not name:
+        return ""
+    return f"{namespace}/{name}"
+
+
+def _cache_directory_stats(path: Path) -> tuple[int, int]:
+    total_bytes = 0
+    file_count = 0
+    try:
+        for directory, _, filenames in os.walk(path):
+            for filename in filenames:
+                candidate = Path(directory) / filename
+                try:
+                    total_bytes += candidate.lstat().st_size
+                    file_count += 1
+                except OSError:
+                    continue
+    except OSError:
+        return total_bytes, file_count
+    return total_bytes, file_count
+
+
+def _cache_ref_revision(path: Path) -> str:
+    refs = path / "refs"
+    if not refs.is_dir():
+        return ""
+    try:
+        candidates = sorted(item for item in refs.rglob("*") if item.is_file())
+    except OSError:
+        return ""
+    for candidate in candidates:
+        try:
+            value = candidate.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            continue
+        if re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+            return value[:12]
+    return ""
 
 
 def _space_required(estimated_bytes: int) -> int:

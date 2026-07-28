@@ -1,13 +1,63 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from axolotl_lcars_ui.hf_manager import HuggingFaceManager, SearchResult
 
 
 class HuggingFaceManagerV44Tests(unittest.TestCase):
+    def test_dataset_cache_rows_keeps_ready_and_surfaces_incomplete_downloads(self) -> None:
+        manager = HuggingFaceManager()
+        with TemporaryDirectory() as temporary_directory:
+            cache_root = Path(temporary_directory)
+            ready_path = cache_root / "datasets--example--ready"
+            ready_path.mkdir()
+            incomplete_path = (
+                cache_root / "datasets--nvidia--Nemotron-SFT-OpenCode-v1"
+            )
+            refs = incomplete_path / "refs"
+            refs.mkdir(parents=True)
+            (refs / "main").write_text(
+                "556d5237acff203f3e1a0be49428634c3606cda2",
+                encoding="utf-8",
+            )
+            ready_row = {
+                "Type": "dataset",
+                "Repo": "example/ready",
+                "Size": "20MB",
+                "Files": "3",
+                "Revision": "abcdef123456",
+                "Path": str(ready_path),
+            }
+            with (
+                patch.object(
+                    manager,
+                    "cache_rows",
+                    return_value=([ready_row], "20MB", 20_000_000),
+                ),
+                patch(
+                    "axolotl_lcars_ui.hf_manager._cache_dir",
+                    return_value=cache_root,
+                ),
+            ):
+                rows = manager.dataset_cache_rows()
+
+        self.assertEqual(
+            [(row["Repo"], row["Status"]) for row in rows],
+            [
+                ("example/ready", "READY"),
+                ("nvidia/Nemotron-SFT-OpenCode-v1", "INCOMPLETE"),
+            ],
+        )
+        incomplete = rows[1]
+        self.assertEqual(incomplete["Revision"], "556d5237acff")
+        self.assertEqual(incomplete["Files"], "1")
+        self.assertIn("Download this dataset again", incomplete["Problem"])
+
     def test_visible_result_hydration_populates_metadata_without_changing_selection(self) -> None:
         manager = HuggingFaceManager()
         manager.vram_limit_gb = 24

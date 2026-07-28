@@ -40,9 +40,11 @@ It is built with the pinned v4.4.0 release of
 - **1 · Setup**: project goal, base model, and an outcome-based smart preset translated into a
   safe Axolotl starter config. Official templates cover Qwen 3.5 2B/4B/9B, Qwen 3.6
   27B/35B-A3B, and Gemma 4 E2B/E4B, with inline option help and a current-value tuning guide.
-- **2 · Data**: a prompt/ideal-answer form that generates chat JSONL automatically, plus a
-  collapsible raw editor, structural checks, draft placeholders, quality guidance, and recoverable
-  saves under `data/`.
+- **2 · Data**: a clear choice between applying a completed Hugging Face dataset download (with
+  OpenAI messages, ShareGPT, Alpaca, and plain-text shape presets) or building local prompt/ideal-
+  answer chat JSONL. The page shows the exact active source, split, subset, and formatter that
+  training will read, plus structural checks, quality guidance, and recoverable local saves.
+  Interrupted cache entries are labeled incomplete and kept out of the training selector.
 - **3 · Train**: beginner launch gate, one-click checked start, short plan, live
   Axolotl/GPU/RAM monitor, training log, optional diagnostics, and detected adapter outputs.
 - **4 · Test**: Ollama Modelfile creation plus held-out side-by-side base/adapter responses.

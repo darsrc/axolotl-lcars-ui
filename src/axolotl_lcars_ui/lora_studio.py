@@ -40,6 +40,120 @@ LORA_GOAL_HINTS: Mapping[str, str] = {
 
 
 @dataclass(frozen=True)
+class LoraDatasetFormat:
+    """One common Hugging Face dataset record shape translated for Axolotl."""
+
+    key: str
+    label: str
+    summary: str
+    record_shape: str
+    settings: Mapping[str, Any]
+
+
+LORA_HF_DATASET_FORMATS: tuple[LoraDatasetFormat, ...] = (
+    LoraDatasetFormat(
+        key="openai-messages",
+        label="OpenAI messages · recommended for chat",
+        summary=(
+            "Each record has a messages list containing role/content objects. "
+            "This is the same shape created by the Studio's local builder."
+        ),
+        record_shape='{"messages": [{"role": "user", "content": "..."}, ...]}',
+        settings={
+            "datasets.0.type": "chat_template",
+            "datasets.0.field_messages": "messages",
+            "datasets.0.roles_to_train": ("assistant",),
+            "datasets.0.train_on_eos": "turn",
+        },
+    ),
+    LoraDatasetFormat(
+        key="sharegpt",
+        label="ShareGPT conversations · from/value",
+        summary=(
+            "Each record has a conversations list whose messages use from/value "
+            "instead of role/content."
+        ),
+        record_shape='{"conversations": [{"from": "human", "value": "..."}, ...]}',
+        settings={
+            "datasets.0.type": "chat_template",
+            "datasets.0.field_messages": "conversations",
+            "datasets.0.message_property_mappings": {
+                "role": "from",
+                "content": "value",
+            },
+            "datasets.0.roles_to_train": ("assistant",),
+            "datasets.0.train_on_eos": "turn",
+        },
+    ),
+    LoraDatasetFormat(
+        key="alpaca",
+        label="Alpaca instructions · instruction/input/output",
+        summary=(
+            "Instruction-tuning rows with instruction and output fields, plus an optional input."
+        ),
+        record_shape='{"instruction": "...", "input": "...", "output": "..."}',
+        settings={
+            "datasets.0.type": "alpaca",
+        },
+    ),
+    LoraDatasetFormat(
+        key="plain-text",
+        label="Plain text · one text field",
+        summary=(
+            "Each row already contains the complete training text in a field named text. "
+            "Use advanced config when the field has another name."
+        ),
+        record_shape='{"text": "complete training text"}',
+        settings={
+            "datasets.0.type": "completion",
+            "datasets.0.field": "text",
+        },
+    ),
+)
+
+_LORA_HF_DATASET_FORMATS_BY_KEY = {
+    dataset_format.key: dataset_format for dataset_format in LORA_HF_DATASET_FORMATS
+}
+_HF_DATASET_REPO_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"
+)
+_HF_DATASET_FORMAT_RESET_KEYS = (
+    "datasets.0.name",
+    "datasets.0.data_files",
+    "datasets.0.ds_type",
+    "datasets.0.field",
+    "datasets.0.field_messages",
+    "datasets.0.chat_template",
+    "datasets.0.chat_template_jinja",
+    "datasets.0.train_on_eos",
+    "datasets.0.train_on_eot",
+    "datasets.0.roles_to_train",
+    "datasets.0.roles",
+    "datasets.0.revision",
+    "datasets.0.input_transform",
+    "datasets.0.shards",
+    "datasets.0.shards_idx",
+    "datasets.0.preprocess_shards",
+    "datasets.0.conversation",
+    "datasets.0.input_format",
+    "datasets.0.field_human",
+    "datasets.0.field_model",
+    "datasets.0.field_tools",
+    "datasets.0.field_thinking",
+    "datasets.0.template_thinking_key",
+    "datasets.0.message_field_role",
+    "datasets.0.message_field_content",
+    "datasets.0.message_property_mappings",
+    "datasets.0.message_field_training",
+    "datasets.0.message_field_training_detail",
+    "datasets.0.split_thinking",
+    "datasets.0.logprobs_field",
+    "datasets.0.temperature",
+    "datasets.0.drop_system_message",
+)
+
+
+@dataclass(frozen=True)
 class LoraModelTemplate:
     """Architecture-aware defaults for one supported chat-model checkpoint."""
 
@@ -702,6 +816,45 @@ def get_lora_model_template(base_model: str) -> LoraModelTemplate | None:
     return _LORA_MODEL_TEMPLATES_BY_ID.get(base_model.strip().casefold())
 
 
+def get_lora_dataset_format(key: str) -> LoraDatasetFormat:
+    """Return a downloaded-dataset shape by stable key."""
+
+    try:
+        return _LORA_HF_DATASET_FORMATS_BY_KEY[key]
+    except KeyError as exc:
+        raise LoraStudioError("Choose one of the common downloaded dataset formats.") from exc
+
+
+def downloaded_dataset_config_updates(
+    repo_id: str,
+    format_key: str,
+    *,
+    split: str = "train",
+    subset: str = "",
+    use_top_level_chat_template: bool = False,
+) -> dict[str, Any]:
+    """Translate a cached Hugging Face dataset choice into a clean Axolotl source."""
+
+    normalized_repo = repo_id.strip()
+    if not _HF_DATASET_REPO_PATTERN.fullmatch(normalized_repo):
+        raise LoraStudioError("Choose a downloaded Hugging Face dataset in owner/name form.")
+    selected_format = get_lora_dataset_format(format_key)
+    normalized_split = _clean_hf_dataset_option(split, fallback="train", label="split")
+    normalized_subset = _clean_hf_dataset_option(subset, fallback="", label="subset")
+    updates: dict[str, Any] = {
+        **{key: None for key in _HF_DATASET_FORMAT_RESET_KEYS},
+        "datasets.0.path": normalized_repo,
+        "datasets.0.split": normalized_split,
+        "datasets.0.name": normalized_subset or None,
+    }
+    updates.update(selected_format.settings)
+    if selected_format.settings.get("datasets.0.type") == "chat_template":
+        updates["datasets.0.chat_template"] = (
+            None if use_top_level_chat_template else "tokenizer_default"
+        )
+    return updates
+
+
 def infer_lora_preset(cfg: Mapping[str, Any]) -> str:
     """Infer the closest smart preset from an existing Axolotl config."""
 
@@ -718,6 +871,13 @@ def infer_lora_preset(cfg: Mapping[str, Any]) -> str:
     if rank >= 32 or context >= 4096:
         return "high-detail"
     return DEFAULT_LORA_PRESET
+
+
+def _clean_hf_dataset_option(value: str, *, fallback: str, label: str) -> str:
+    normalized = value.strip() or fallback
+    if len(normalized) > 128 or any(character in normalized for character in ("\n", "\r")):
+        raise LoraStudioError(f"Dataset {label} must be one short line.")
+    return normalized
 
 
 def recommend_lora_preset(
@@ -1237,18 +1397,22 @@ __all__ = [
     "LORA_BASE_MODEL_HINTS",
     "LORA_GOALS",
     "LORA_GOAL_HINTS",
+    "LORA_HF_DATASET_FORMATS",
     "LORA_MEMORY_PROFILES",
     "LORA_MODEL_TEMPLATES",
     "LORA_PRESETS",
     "LORA_PRESET_KEYS",
     "LORA_TUNING_HINTS",
     "LoraPreset",
+    "LoraDatasetFormat",
     "LoraModelTemplate",
     "LoraStudioError",
     "LoraTuningHint",
     "beginner_config_updates",
     "chat_example_line",
     "discover_adapter_artifacts",
+    "downloaded_dataset_config_updates",
+    "get_lora_dataset_format",
     "get_lora_preset",
     "get_lora_model_template",
     "infer_lora_preset",

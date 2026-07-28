@@ -75,12 +75,25 @@ The first five navigation items form one guided workflow:
    run. Gemma 4 uses a language-backbone regex because Axolotl does not support its generic
    `lora_target_linear` switch for multimodal models. Use Axolotl 0.16.0 or newer for Qwen 3.5/3.6
    and 0.16.1 or newer for Gemma 4.
-3. **2 · Data** lets you enter a user prompt and exact ideal answer in a normal form; **Add &
-   Save** generates the chat JSONL automatically. The first form entry replaces the untouched
-   `EDIT ME` starter template and later entries append safely. A collapsible raw editor remains
-   available for bulk work. An overwritten dataset keeps its immediately previous version as
-   `filename.jsonl.bak`. Guided JSONL files are gitignored by default because personality data can
-   contain private material.
+3. **2 · Data** starts by showing the exact source, route, record format, split, and optional subset
+   that training will read. Choose one of two routes:
+
+   - **Option A · Use a Downloaded Dataset** lists completed Hugging Face dataset snapshots and
+     current transfers. Select the repository and match its column shape: OpenAI `messages`,
+     ShareGPT `conversations` with `from`/`value`, Alpaca `instruction`/`input`/`output`, or a
+     complete `text` field. The YAML uses the stable `owner/name`; Hugging Face automatically
+     reuses the downloaded cache. Dataset split slices such as `train[:10%]` and named subsets are
+     supported. If a transfer left only a partial cache entry, the page labels it **INCOMPLETE**,
+     explains that its snapshot cannot be used for training, and directs you to download it again.
+   - **Option B · Build My Own Dataset** lets you enter a user prompt and exact ideal answer in a
+     normal form; **Add & Save Local Example** generates chat JSONL automatically. The first form
+     entry replaces the untouched `EDIT ME` starter template and later entries append safely. A
+     collapsible raw editor remains available for bulk work. Saving Option B makes that local JSONL
+     the active source.
+
+   An overwritten local dataset keeps its immediately previous version as `filename.jsonl.bak`.
+   Guided JSONL files are gitignored by default because personality data can contain private
+   material.
 4. **3 · Train** blocks its beginner start button until the configured data passes the Studio
    checks and Axolotl preflight. **Start Training** reruns those checks automatically; standalone
    preprocessing remains an optional diagnostic. The page exposes stop, live logs, GPU/RAM

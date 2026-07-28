@@ -30,6 +30,7 @@ from axolotl_lcars_ui.lora_studio import (
     LORA_BASE_MODEL_HINTS,
     LORA_GOALS,
     LORA_GOAL_HINTS,
+    LORA_HF_DATASET_FORMATS,
     LORA_MODEL_TEMPLATES,
     LORA_PRESETS,
     LORA_PRESET_KEYS,
@@ -39,6 +40,8 @@ from axolotl_lcars_ui.lora_studio import (
     beginner_config_updates,
     chat_example_line,
     discover_adapter_artifacts,
+    downloaded_dataset_config_updates,
+    get_lora_dataset_format,
     get_lora_model_template,
     get_lora_preset,
     infer_lora_preset,
@@ -224,6 +227,9 @@ DATASET_PRESETS = {
 }
 
 LORA_BASE_MODEL_VALUES = tuple(value for _, value in LORA_BASE_MODELS)
+LORA_HF_DATASET_FORMAT_KEYS = tuple(
+    dataset_format.key for dataset_format in LORA_HF_DATASET_FORMATS
+)
 
 CONFIG_VALUE_HINTS: dict[str, dict[str, str]] = {
     "adapter": {
@@ -1149,6 +1155,30 @@ def _lora_setup_page() -> None:
 def _lora_data_page() -> None:
     cfg = _load_config_or_empty()
     report = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    dataset_cache_rows = _lora_dataset_cache_rows()
+    cached_datasets = _lora_downloaded_dataset_cache_rows(dataset_cache_rows)
+    cached_dataset_ids = tuple(row["Repo"] for row in cached_datasets)
+    configured_dataset = str(_config_path_value(cfg, "datasets.0.path") or "").strip()
+    downloaded_dataset_default = _widget_value(
+        "lora-hf-dataset",
+        (
+            configured_dataset
+            if configured_dataset in cached_dataset_ids
+            else (cached_dataset_ids[0] if cached_dataset_ids else "")
+        ),
+    )
+    if downloaded_dataset_default not in cached_dataset_ids:
+        downloaded_dataset_default = cached_dataset_ids[0] if cached_dataset_ids else ""
+    downloaded_format_default = _widget_value(
+        "lora-hf-dataset-format",
+        _infer_lora_hf_dataset_format(cfg),
+    )
+    if downloaded_format_default not in LORA_HF_DATASET_FORMAT_KEYS:
+        downloaded_format_default = LORA_HF_DATASET_FORMAT_KEYS[0]
+    split_default = str(_config_path_value(cfg, "datasets.0.split") or "train")
+    subset_default = str(_config_path_value(cfg, "datasets.0.name") or "")
+    _seed_text("lora-hf-dataset-split", split_default)
+    _seed_text("lora-hf-dataset-subset", subset_default)
     project_name = _widget_value(
         "lora-project-name",
         Path(STATE.config_store.active_name).stem,
@@ -1163,16 +1193,34 @@ def _lora_data_page() -> None:
 
     with lcars.page("LoRA Data", id="lora-data", layout="grid", fillers=False):
         with lcars.data_panel(
-            "Configured Dataset Readiness",
+            "Current Training Dataset",
             color="golden-tanoi",
             id="lora-data-status-panel",
             zone="full",
-            span=(4, 2),
+            span=(4, 5),
             weight=10,
             aspect="wide",
             group="lora-data",
             options=DENSE_PANEL_OPTIONS,
         ):
+            lcars.markdown(
+                "**This is the one dataset the Train page will use.** Choose either the downloaded "
+                "dataset route or the local example builder below; selecting one replaces the "
+                "other as the active source.",
+                id="lora-data-current-help",
+            )
+            lcars.text(
+                _lora_active_dataset_summary(cfg, report, cached_dataset_ids),
+                id="lora-data-active-source",
+                options=lcars.TextOptions(
+                    description=(
+                        "This summary comes directly from datasets[0] in the active YAML."
+                    ),
+                    selectable=True,
+                    copyable=True,
+                    wrap="wrap",
+                ),
+            )
             lcars.metric(
                 "Status",
                 _lora_dataset_status(cfg, report),
@@ -1185,28 +1233,6 @@ def _lora_data_page() -> None:
                 id="lora-data-status",
                 options=lcars.MetricOptions(secondary_value=report.source or "No source"),
             )
-            lcars.metric(
-                "Examples",
-                "REMOTE" if report.example_count is None else str(report.example_count),
-                status=(
-                    "ok"
-                    if report.example_count is None or report.example_count >= 20
-                    else "warn"
-                ),
-                color="tanoi",
-                id="lora-data-example-count",
-                options=lcars.MetricOptions(
-                    secondary_value=f"{report.message_count} chat messages"
-                ),
-            )
-            lcars.metric(
-                "Saved Placeholders",
-                str(report.placeholder_count),
-                status="warn" if report.placeholder_count else "ok",
-                color="lilac",
-                id="lora-data-placeholder-count",
-                options=lcars.MetricOptions(secondary_value="must be replaced before training"),
-            )
             _enhanced_table(
                 _lora_dataset_issue_rows(report),
                 title="Data Checks",
@@ -1215,7 +1241,126 @@ def _lora_data_page() -> None:
             )
 
         with lcars.control_panel(
-            "Easy Conversation Builder",
+            "Option A · Use A Downloaded Dataset",
+            color="anakiwa",
+            id="lora-downloaded-dataset-panel",
+            zone="full",
+            span=(4, 9),
+            weight=11,
+            aspect="wide",
+            group="lora-data-downloaded",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Datasets downloaded through **HF Hub** live in the Hugging Face cache. Pick one "
+                "below and tell the Studio what one row looks like. The config uses its stable "
+                "`owner/name`; Hugging Face reuses the downloaded files automatically. You do "
+                "**not** paste downloaded data into the JSONL editor.",
+                id="lora-downloaded-dataset-help",
+            )
+            _enhanced_table(
+                _lora_dataset_download_rows(dataset_cache_rows, configured_dataset),
+                title="Downloaded / In-Progress Datasets",
+                id="lora-downloaded-dataset-table",
+                filter_columns={"Dataset", "Status", "Revision", "What to do"},
+                copy_columns={"Dataset", "Cache path"},
+            )
+            with lcars.form(
+                "Use Downloaded Dataset",
+                action_id="lora-use-downloaded-dataset",
+                submit_label="Use This Downloaded Dataset",
+                id="lora-downloaded-dataset-form",
+                color="anakiwa",
+                disabled=not bool(cached_datasets),
+                options=lcars.FormOptions(
+                    layout="grid",
+                    columns=2,
+                    description=(
+                        "This changes only the active YAML dataset source and format. "
+                        "It does not copy or delete cached files."
+                    ),
+                ),
+            ):
+                downloaded_dataset = lcars.select(
+                    "Downloaded Dataset",
+                    _lora_downloaded_dataset_options(cached_datasets),
+                    value=downloaded_dataset_default,
+                    id="lora-hf-dataset",
+                    disabled=not bool(cached_datasets),
+                    settings=lcars.ChoiceOptions(
+                        searchable=True,
+                        description=(
+                            "Only completed Hugging Face dataset downloads appear here."
+                        ),
+                    ),
+                )
+                downloaded_format = lcars.select(
+                    "What Does One Row Look Like?",
+                    _lora_hf_dataset_format_options(),
+                    value=downloaded_format_default,
+                    id="lora-hf-dataset-format",
+                    settings=lcars.ChoiceOptions(
+                        description=(
+                            "Pick by column names, not by the subject of the dataset. "
+                            "The descriptions show the expected fields."
+                        )
+                    ),
+                )
+                downloaded_split = lcars.text_input(
+                    "Training Split",
+                    value=split_default,
+                    placeholder="train",
+                    autocomplete=False,
+                    id="lora-hf-dataset-split",
+                    options=lcars.TextInputOptions(
+                        description=(
+                            "Usually train. Slices such as train[:10%] are useful for a quick run."
+                        ),
+                        validation=lcars.ValidationOptions(required=True),
+                    ),
+                )
+                downloaded_subset = lcars.text_input(
+                    "Dataset Subset / Config · optional",
+                    value=subset_default,
+                    placeholder="Leave blank unless the dataset card names a subset",
+                    autocomplete=False,
+                    id="lora-hf-dataset-subset",
+                    options=lcars.TextInputOptions(
+                        description=(
+                            "Some repositories contain named configurations such as default, "
+                            "en, or cleaned. This is not the train/validation split."
+                        )
+                    ),
+                )
+            if _is_active_action("lora-use-downloaded-dataset"):
+                _lora_use_downloaded_dataset_action(
+                    downloaded_dataset,
+                    downloaded_format,
+                    downloaded_split,
+                    downloaded_subset,
+                )
+            lcars.alert(
+                _lora_dataset_cache_notice(dataset_cache_rows, cached_datasets),
+                level="yellow",
+                id="lora-no-downloaded-datasets",
+                visible=(
+                    not bool(cached_datasets)
+                    or any(
+                        row.get("Status") == "INCOMPLETE"
+                        for row in dataset_cache_rows
+                    )
+                ),
+            )
+            lcars.markdown(
+                "[Find datasets in HF Hub](?page=hub) · "
+                "[Watch downloads and cache](?page=content) · "
+                "[Unusual columns? Open full Dataset settings](?page=setup)",
+                id="lora-downloaded-dataset-links",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+
+        with lcars.control_panel(
+            "Option B · Build My Own Dataset",
             color="tanoi",
             id="lora-example-builder-panel",
             zone="full",
@@ -1226,15 +1371,16 @@ def _lora_data_page() -> None:
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
-                "Write one realistic prompt and the **exact answer you want the model to imitate**. "
-                "Press **Add & Save**, then repeat with different wording, difficulty, moods, "
-                "boundaries, and failure cases. The app creates the JSONL for you.",
+                "Use this route when you want to author behavior examples yourself. Write one "
+                "realistic prompt and the **exact answer you want the model to imitate**. Press "
+                "**Add & Save Local Example**, then repeat. Saving here switches the active "
+                "dataset from any Hub download to this project's local JSONL file.",
                 id="lora-example-builder-help",
             )
             with lcars.form(
                 "One Training Conversation",
                 action_id="lora-example-add",
-                submit_label="Add & Save This Example",
+                submit_label="Add & Save Local Example",
                 id="lora-example-form",
                 color="tanoi",
                 options=lcars.FormOptions(layout="grid", columns=2),
@@ -1295,12 +1441,13 @@ def _lora_data_page() -> None:
                 )
             lcars.text(
                 "Your first form example replaces the untouched EDIT ME starter template. "
-                "Later examples are appended. The raw editor below is optional.",
+                "Later examples are appended. The raw editor below is optional and belongs only "
+                "to this local-dataset route.",
                 id="lora-example-builder-note",
             )
 
         with lcars.control_panel(
-            "Advanced JSONL Editor",
+            "Option B Advanced · Raw JSONL",
             color="golden-tanoi",
             id="lora-data-editor-panel",
             zone="full",
@@ -3898,6 +4045,204 @@ def _lora_model_template_rows() -> list[dict[str, str]]:
     ]
 
 
+def _lora_dataset_cache_rows() -> list[dict[str, str]]:
+    return STATE.hf.dataset_cache_rows()
+
+
+def _lora_downloaded_dataset_cache_rows(
+    rows: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    rows = _lora_dataset_cache_rows() if rows is None else rows
+    return [
+        row
+        for row in rows
+        if str(row.get("Type") or "").strip().casefold() in {"dataset", "datasets"}
+        and str(row.get("Repo") or "").strip()
+        and str(row.get("Status") or "READY").strip().upper() == "READY"
+    ]
+
+
+def _lora_downloaded_dataset_options(
+    rows: list[dict[str, str]],
+) -> list[lcars.SelectOption]:
+    if not rows:
+        return [
+            lcars.SelectOption(
+                label="No completed dataset downloads found",
+                value="",
+                description="Download a dataset from HF Hub, then return to this page.",
+            )
+        ]
+    return [
+        lcars.SelectOption(
+            label=f"{row['Repo']} · {row.get('Size') or 'size unknown'}",
+            value=row["Repo"],
+            description=(
+                f"Cached revision {row.get('Revision') or 'unknown'} at "
+                f"{row.get('Path') or 'the Hugging Face cache'}."
+            ),
+        )
+        for row in rows
+    ]
+
+
+def _lora_hf_dataset_format_options() -> list[lcars.SelectOption]:
+    return [
+        lcars.SelectOption(
+            label=dataset_format.label,
+            value=dataset_format.key,
+            description=f"{dataset_format.summary} Shape: {dataset_format.record_shape}",
+        )
+        for dataset_format in LORA_HF_DATASET_FORMATS
+    ]
+
+
+def _infer_lora_hf_dataset_format(cfg: dict[str, Any]) -> str:
+    dataset_type = str(_config_path_value(cfg, "datasets.0.type") or "").casefold()
+    messages_field = str(
+        _config_path_value(cfg, "datasets.0.field_messages") or ""
+    ).casefold()
+    if dataset_type == "completion":
+        return "plain-text"
+    if dataset_type == "alpaca":
+        return "alpaca"
+    if dataset_type == "sharegpt" or messages_field == "conversations":
+        return "sharegpt"
+    return "openai-messages"
+
+
+def _lora_data_source_label(
+    report: DatasetReport,
+    cached_dataset_ids: tuple[str, ...],
+) -> str:
+    if not report.source:
+        return "NOT CHOSEN"
+    if report.source_kind == "local":
+        return "LOCAL JSONL"
+    if report.source in cached_dataset_ids:
+        return "DOWNLOADED HF"
+    return "HF REPOSITORY"
+
+
+def _lora_active_dataset_summary(
+    cfg: dict[str, Any],
+    report: DatasetReport,
+    cached_dataset_ids: tuple[str, ...],
+) -> str:
+    source_label = _lora_data_source_label(report, cached_dataset_ids)
+    dataset_type = str(_config_path_value(cfg, "datasets.0.type") or "not set")
+    format_key = _infer_lora_hf_dataset_format(cfg)
+    format_label = get_lora_dataset_format(format_key).label
+    split = str(_config_path_value(cfg, "datasets.0.split") or "train")
+    subset = str(_config_path_value(cfg, "datasets.0.name") or "none")
+    contents = (
+        "rows checked when preprocessing starts"
+        if report.example_count is None
+        else (
+            f"{report.example_count} examples / {report.message_count} messages / "
+            f"{report.placeholder_count} placeholders"
+        )
+    )
+    return (
+        f"TRAINING WILL READ: {report.source or 'not chosen'} · {source_label} · "
+        f"{dataset_type} / {format_label} · split {split} · subset {subset} · {contents}"
+    )
+
+
+def _lora_dataset_download_rows(
+    cache_rows: list[dict[str, str]],
+    configured_dataset: str,
+) -> list[dict[str, str]]:
+    rows = [
+        {
+            "Dataset": row["Repo"],
+            "Status": (
+                "IN USE"
+                if row["Repo"] == configured_dataset
+                and str(row.get("Status") or "READY").upper() == "READY"
+                else str(row.get("Status") or "READY").upper()
+            ),
+            "Size": row.get("Size") or "",
+            "Revision": row.get("Revision") or "",
+            "Cache path": row.get("Path") or "",
+            "What to do": row.get("Problem") or "Ready to select below.",
+        }
+        for row in cache_rows
+    ]
+    cached_ids = {row["Repo"] for row in cache_rows}
+    for job in STATE.hf.job_rows():
+        repo_id = str(job.get("Repo") or "")
+        if (
+            str(job.get("Type") or "").casefold() != "dataset"
+            or not repo_id
+            or repo_id in cached_ids
+        ):
+            continue
+        rows.append(
+            {
+                "Dataset": repo_id,
+                "Status": str(job.get("Status") or "queued").upper(),
+                "Size": str(job.get("Estimate") or ""),
+                "Revision": str(job.get("Revision") or ""),
+                "Cache path": str(job.get("Local Path") or ""),
+                "What to do": _lora_dataset_job_guidance(
+                    str(job.get("Status") or "queued")
+                ),
+            }
+        )
+    if not rows:
+        return [
+            {
+                "Dataset": "No dataset downloads found",
+                "Status": "OPEN HF HUB",
+                "Size": "",
+                "Revision": "",
+                "Cache path": "",
+                "What to do": "Find and download a dataset from HF Hub.",
+            }
+        ]
+    return sorted(rows, key=lambda row: (row["Status"] != "IN USE", row["Dataset"].casefold()))
+
+
+def _lora_dataset_job_guidance(status: str) -> str:
+    normalized = status.strip().casefold()
+    if normalized == "failed":
+        return "Open Content for the error, then download again."
+    if normalized == "complete":
+        return "Refresh the cache if this does not become READY."
+    return "Wait for the transfer to finish; this page updates automatically."
+
+
+def _lora_dataset_cache_notice(
+    cache_rows: list[dict[str, str]],
+    ready_rows: list[dict[str, str]],
+) -> str:
+    incomplete = [
+        row
+        for row in cache_rows
+        if str(row.get("Status") or "").strip().upper() == "INCOMPLETE"
+    ]
+    if incomplete:
+        names = ", ".join(str(row.get("Repo") or "unknown") for row in incomplete[:3])
+        extra = f" and {len(incomplete) - 3} more" if len(incomplete) > 3 else ""
+        ready_note = (
+            " Other completed datasets remain selectable below."
+            if ready_rows
+            else " No dataset can be selected until a download reaches READY."
+        )
+        return (
+            f"Incomplete Hugging Face dataset cache found: {names}{extra}. "
+            "Its snapshot is missing or unreadable, so training cannot safely use it. "
+            "Return to HF Hub and download that dataset again."
+            f"{ready_note}"
+        )
+    return (
+        "No completed dataset downloads were found in the Hugging Face cache. "
+        "Open HF Hub, search with Repo Type = dataset, inspect and download one, "
+        "then return here. The transfer appears automatically when complete."
+    )
+
+
 def _lora_tuning_rows(cfg: dict[str, Any]) -> list[dict[str, str]]:
     return [
         {
@@ -4786,6 +5131,50 @@ def _stop_axolotl_action() -> None:
     _update_workflow_widgets()
 
 
+def _lora_use_downloaded_dataset_action(
+    repo_id: str,
+    format_key: str,
+    split: str,
+    subset: str,
+) -> None:
+    if _workflow_blocks_config_change():
+        return
+    try:
+        cached_rows = _lora_downloaded_dataset_cache_rows()
+        cached_ids = {row["Repo"] for row in cached_rows}
+        if repo_id not in cached_ids:
+            raise LoraStudioError(
+                "That dataset is not a completed download. Wait for the transfer or refresh "
+                "the HF cache list."
+            )
+        cfg = STATE.config_store.load()
+        model_template = get_lora_model_template(str(cfg.get("base_model") or ""))
+        updates = downloaded_dataset_config_updates(
+            repo_id,
+            format_key,
+            split=split,
+            subset=subset,
+            use_top_level_chat_template=model_template is not None,
+        )
+        STATE.config_store.apply_updates(updates)
+        _set_session_value("lora-hf-dataset", repo_id)
+        _set_session_value("lora-hf-dataset-format", format_key)
+        _set_session_value("lora-hf-dataset-split", split.strip() or "train")
+        _set_session_value("lora-hf-dataset-subset", subset.strip())
+        _update_config_widgets()
+        issues = STATE.refresh_preflight()
+        _update_preflight_widgets(issues)
+        _update_lora_widgets()
+        _update_lora_downloaded_dataset_widgets()
+        selected_format = get_lora_dataset_format(format_key)
+        lcars.notify(
+            f"Using downloaded dataset {repo_id} as {selected_format.label}. "
+            "Axolotl will reuse the Hugging Face cache. Next, review preflight on Train."
+        )
+    except Exception as exc:
+        lcars.notify(f"Could not use downloaded dataset: {exc}", level="error")
+
+
 def _lora_setup_action(
     project_name: str,
     goal: str,
@@ -5610,6 +5999,9 @@ def _update_config_widgets() -> None:
 def _update_lora_widgets() -> None:
     cfg = _load_config_or_empty()
     dataset = inspect_configured_dataset(PROJECT_ROOT, cfg)
+    dataset_cache_rows = _lora_dataset_cache_rows()
+    cached_datasets = _lora_downloaded_dataset_cache_rows(dataset_cache_rows)
+    cached_dataset_ids = tuple(row["Repo"] for row in cached_datasets)
     artifacts = discover_adapter_artifacts(PROJECT_ROOT, cfg)
     errors = [issue for issue in STATE.preflight_issues if issue.severity == "error"]
     steps = _lora_journey_rows(cfg, dataset, bool(artifacts))
@@ -5664,21 +6056,8 @@ def _update_lora_widgets() -> None:
         ).model_dump(mode="json"),
     )
     lcars.update(
-        "lora-data-example-count",
-        value="REMOTE" if dataset.example_count is None else str(dataset.example_count),
-        status=(
-            "ok"
-            if dataset.example_count is None or dataset.example_count >= 20
-            else "warn"
-        ),
-        options=lcars.MetricOptions(
-            secondary_value=f"{dataset.message_count} chat messages"
-        ).model_dump(mode="json"),
-    )
-    lcars.update(
-        "lora-data-placeholder-count",
-        value=str(dataset.placeholder_count),
-        status="warn" if dataset.placeholder_count else "ok",
+        "lora-data-active-source",
+        content=_lora_active_dataset_summary(cfg, dataset, cached_dataset_ids),
     )
     lcars.update(
         "lora-data-checks-table",
@@ -5888,6 +6267,42 @@ def _update_hf_widgets() -> None:
     )
 
 
+def _update_lora_downloaded_dataset_widgets(
+    *,
+    cache_rows: list[dict[str, str]] | None = None,
+) -> None:
+    rows = cache_rows if cache_rows is not None else _lora_dataset_cache_rows()
+    ready_rows = _lora_downloaded_dataset_cache_rows(rows)
+    configured_dataset = str(
+        _config_path_value(_load_config_or_empty(), "datasets.0.path") or ""
+    ).strip()
+    options = [
+        option.model_dump(mode="json")
+        for option in _lora_downloaded_dataset_options(ready_rows)
+    ]
+    lcars.update(
+        "lora-downloaded-dataset-table",
+        **_table_payload(
+            _lora_dataset_download_rows(rows, configured_dataset),
+            copy_columns={"Dataset", "Cache path"},
+        ),
+    )
+    lcars.update(
+        "lora-hf-dataset",
+        options=options,
+        disabled=not bool(ready_rows),
+    )
+    lcars.update("lora-downloaded-dataset-form", disabled=not bool(ready_rows))
+    lcars.update(
+        "lora-no-downloaded-datasets",
+        content=_lora_dataset_cache_notice(rows, ready_rows),
+        visible=(
+            not bool(ready_rows)
+            or any(row.get("Status") == "INCOMPLETE" for row in rows)
+        ),
+    )
+
+
 def _update_cache_widgets(*, live: bool = False) -> None:
     try:
         rows, total_text, total_bytes = STATE.hf.cache_rows()
@@ -5919,6 +6334,7 @@ def _update_cache_widgets(*, live: bool = False) -> None:
         ),
     )
     lcars.update("hf-use-local", disabled=not bool(STATE.hf.last_local_path))
+    _update_lora_downloaded_dataset_widgets()
     if not live:
         _append_hf_logs()
 

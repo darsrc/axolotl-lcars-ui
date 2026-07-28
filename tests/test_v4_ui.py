@@ -131,6 +131,32 @@ class V44UiTests(unittest.TestCase):
             },
         )
         self.assertTrue(self.widgets["lora-data-editor-panel"].options.initial_collapsed)
+        downloaded_form = self.widgets["lora-downloaded-dataset-form"]
+        self.assertEqual(downloaded_form.action_id, "lora-use-downloaded-dataset")
+        self.assertEqual(
+            {child.id for child in downloaded_form.children},
+            {
+                "lora-hf-dataset",
+                "lora-hf-dataset-format",
+                "lora-hf-dataset-split",
+                "lora-hf-dataset-subset",
+            },
+        )
+        self.assertEqual(len(self.widgets["lora-hf-dataset-format"].options), 4)
+        self.assertTrue(
+            all(
+                option.description
+                for option in self.widgets["lora-hf-dataset-format"].options
+            )
+        )
+        self.assertIn(
+            "one dataset",
+            self.widgets["lora-data-current-help"].content.lower(),
+        )
+        self.assertIn(
+            "TRAINING WILL READ",
+            self.widgets["lora-data-active-source"].content,
+        )
 
         self.assertEqual(
             self.widgets["lora-training-log"].stream_id,
@@ -254,6 +280,92 @@ class V44UiTests(unittest.TestCase):
         self.assertTrue(saved)
         updates = apply_updates.call_args.args[0]
         self.assertIsNone(updates["datasets.0.chat_template"])
+
+    def test_downloaded_dataset_action_applies_cache_repo_and_shape_atomically(self) -> None:
+        cached = [
+            {
+                "Type": "dataset",
+                "Repo": "example/downloaded-chat",
+                "Size": "20MB",
+                "Files": "3",
+                "Revision": "abcdef123456",
+                "Path": "/cache/datasets--example--downloaded-chat",
+            }
+        ]
+        with (
+            patch.object(
+                main,
+                "_lora_downloaded_dataset_cache_rows",
+                return_value=cached,
+            ),
+            patch.object(
+                main.STATE.config_store,
+                "load",
+                return_value={"base_model": "Qwen/Qwen3.5-4B"},
+            ),
+            patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
+            patch.object(main.STATE, "refresh_preflight", return_value=[]),
+            patch.object(main, "_workflow_blocks_config_change", return_value=False),
+            patch.object(main, "_set_session_value"),
+            patch.object(main, "_update_config_widgets"),
+            patch.object(main, "_update_preflight_widgets"),
+            patch.object(main, "_update_lora_widgets"),
+            patch.object(main, "_update_lora_downloaded_dataset_widgets"),
+            patch.object(main.lcars, "notify") as notify,
+        ):
+            main._lora_use_downloaded_dataset_action(
+                "example/downloaded-chat",
+                "sharegpt",
+                "train[:25%]",
+                "cleaned",
+            )
+
+        updates = apply_updates.call_args.args[0]
+        self.assertEqual(updates["datasets.0.path"], "example/downloaded-chat")
+        self.assertEqual(updates["datasets.0.split"], "train[:25%]")
+        self.assertEqual(updates["datasets.0.name"], "cleaned")
+        self.assertEqual(updates["datasets.0.type"], "chat_template")
+        self.assertEqual(updates["datasets.0.field_messages"], "conversations")
+        self.assertIsNone(updates["datasets.0.chat_template"])
+        notify.assert_called_once()
+
+    def test_incomplete_dataset_cache_is_visible_but_cannot_be_selected(self) -> None:
+        cache_rows = [
+            {
+                "Type": "dataset",
+                "Repo": "example/ready",
+                "Status": "READY",
+                "Size": "20MB",
+                "Files": "3",
+                "Revision": "abcdef123456",
+                "Path": "/cache/datasets--example--ready",
+                "Problem": "",
+            },
+            {
+                "Type": "dataset",
+                "Repo": "nvidia/incomplete",
+                "Status": "INCOMPLETE",
+                "Size": "40B",
+                "Files": "1",
+                "Revision": "123456789abc",
+                "Path": "/cache/datasets--nvidia--incomplete",
+                "Problem": "No completed snapshot exists. Download this dataset again.",
+            },
+        ]
+
+        ready_rows = main._lora_downloaded_dataset_cache_rows(cache_rows)
+        with patch.object(main.STATE.hf, "job_rows", return_value=[]):
+            display_rows = main._lora_dataset_download_rows(cache_rows, "")
+
+        self.assertEqual([row["Repo"] for row in ready_rows], ["example/ready"])
+        incomplete = next(
+            row for row in display_rows if row["Dataset"] == "nvidia/incomplete"
+        )
+        self.assertEqual(incomplete["Status"], "INCOMPLETE")
+        self.assertIn("Download this dataset again", incomplete["What to do"])
+        notice = main._lora_dataset_cache_notice(cache_rows, ready_rows)
+        self.assertIn("nvidia/incomplete", notice)
+        self.assertIn("cannot safely use it", notice)
 
     def test_easy_example_builder_replaces_the_untouched_template_then_saves(self) -> None:
         original_ctx = get_ctx()
