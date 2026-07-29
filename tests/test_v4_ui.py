@@ -503,7 +503,7 @@ class V44UiTests(unittest.TestCase):
         results = self.widgets["hf-results-table"]
         self.assertTrue(results.options.expandable)
         self.assertTrue(results.options.sticky_header)
-        self.assertEqual(results.options.data_mode, "client")
+        self.assertEqual(results.options.data_mode, "server")
         self.assertTrue(results.options.emit_state_changes)
         self.assertTrue(results.options.row_click_select)
         self.assertEqual(results.options.selection.mode, "single")
@@ -1322,6 +1322,11 @@ class V44UiTests(unittest.TestCase):
             self.assertIsNotNone(pagination)
             self.assertEqual(pagination.page, 2)
             self.assertEqual(pagination.page_size, 25)
+            self.assertEqual(pagination.total_rows, 55)
+            self.assertEqual(main._hf_result_table_options().data_mode, "server")
+            page_rows = main._hf_result_rows()
+            self.assertEqual(len(page_rows), 25)
+            self.assertEqual(page_rows[0].id, main._hf_result_row_id(results[25]))
             self.assertEqual(
                 get_session_state(session_id)[main.HF_RESULTS_PAGE_KEY],
                 "2",

@@ -3619,6 +3619,15 @@ def _reset_hf_results_page() -> None:
     _set_session_value(HF_RESULTS_PAGE_KEY, "1")
 
 
+def _hf_visible_page_results() -> list[Any]:
+    """Return the server-owned result slice for the current Hub table page."""
+
+    visible_results = _hf_visible_results()
+    page, page_size = _hf_results_pagination(len(visible_results))
+    start = (page - 1) * page_size
+    return visible_results[start : start + page_size]
+
+
 def _hf_result_table_options() -> lcars.TableOptions:
     visible_results = _hf_visible_results()
     page, page_size = _hf_results_pagination(len(visible_results))
@@ -3696,13 +3705,17 @@ def _hf_result_table_options() -> lcars.TableOptions:
             if sort_key in visible_sort_keys
             else []
         ),
-        pagination=lcars.TablePagination(page=page, page_size=page_size),
+        pagination=lcars.TablePagination(
+            page=page,
+            page_size=page_size,
+            total_rows=len(visible_results),
+        ),
         selection=lcars.TableSelection(mode="single", selected_ids=selected_ids),
         expanded_ids=expanded_ids,
         expandable=True,
         sticky_header=True,
         density="compact",
-        data_mode="client",
+        data_mode="server",
         emit_state_changes=True,
         row_click_select=True,
         interaction=lcars.InteractionOptions(action_id=HF_RESULTS_TABLE_ID),
@@ -4021,7 +4034,7 @@ def _hf_repo_url(repo_id: str, repo_type: str) -> str:
 
 
 def _hf_result_rows() -> list[lcars.TableRow]:
-    visible_results = _hf_visible_results()
+    visible_results = _hf_visible_page_results()
     if not visible_results:
         return []
 
@@ -4140,9 +4153,8 @@ def _handle_hf_table_action() -> None:
             return
 
         if kind == "page":
-            start = (page - 1) * page_size
             attempted = STATE.hf.hydrate_results(
-                _hf_visible_results()[start : start + page_size],
+                _hf_visible_page_results(),
                 limit=page_size,
             )
             if attempted:
