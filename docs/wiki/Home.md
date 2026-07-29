@@ -2,7 +2,7 @@
 
 Axolotl LCARS UI is a browser-based control surface for configuring, validating, launching, and monitoring [Axolotl](https://docs.axolotl.ai/) workflows.
 
-It is built with the pinned post-v4.4.0 revision `c0171c7` of
+It tracks the latest `main` branch of
 [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI).
 
 ## What It Manages

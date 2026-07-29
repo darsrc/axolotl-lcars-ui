@@ -29,12 +29,11 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` installs the tested LCARS WebUI post-v4.4.0 revision `c0171c7` directly from
-[darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). The exact commit is pinned so a future
-upstream `main` change cannot silently break this app. This revision adds contextual
-tooltips/interactive popovers on every widget and keeps long navigation rails reachable. For local
-`lcars-ui` development, install your own checkout into the venv in editable mode after installing
-requirements:
+`requirements.txt` installs the latest LCARS WebUI `main` branch directly from
+[darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). New installs therefore follow current
+upstream functionality, including contextual tooltips/interactive popovers and the scrollable
+navigation rail. To refresh an existing environment, reinstall the requirement; for local
+`lcars-ui` development, install your own checkout into the venv in editable mode:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
@@ -112,9 +111,8 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry in
   aligned overview/detail rows with compact GPU readouts and independent table scrolling.
-- LCARS WebUI v4.4 plus the pinned contextual-hints revision: content-sized, viewport-aware mosaic
-  layouts with edge-aware operator arrangement, editable rows, columns and sections, stable panel
-  grouping, dense-page filler
+- Latest LCARS WebUI `main`: content-sized, viewport-aware mosaic layouts with edge-aware operator
+  arrangement, editable rows, columns and sections, stable panel grouping, dense-page filler
   control, native sortable/filterable/pageable data tables, and an immersive typed node-graph
   editor with groups, comments, reroutes, a searchable palette, and JSON interchange. Tables keep
   stable selection, rich expandable details, linked/copyable cells, and inline actions; controls
