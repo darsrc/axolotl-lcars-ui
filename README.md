@@ -29,10 +29,12 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`requirements.txt` installs the tested LCARS WebUI v4.4.0 release tag directly from
-[darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). The tag is pinned so a future
-upstream `main` change cannot silently break this app. For local `lcars-ui` development, install
-your own checkout into the venv in editable mode after installing requirements:
+`requirements.txt` installs the tested LCARS WebUI post-v4.4.0 revision `c0171c7` directly from
+[darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). The exact commit is pinned so a future
+upstream `main` change cannot silently break this app. This revision adds contextual
+tooltips/interactive popovers on every widget and keeps long navigation rails reachable. For local
+`lcars-ui` development, install your own checkout into the venv in editable mode after installing
+requirements:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
@@ -110,21 +112,25 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry in
   aligned overview/detail rows with compact GPU readouts and independent table scrolling.
-- LCARS WebUI v4.4 content-sized, viewport-aware mosaic layouts with edge-aware operator
-  arrangement, editable rows, columns and sections, stable panel grouping, dense-page filler
+- LCARS WebUI v4.4 plus the pinned contextual-hints revision: content-sized, viewport-aware mosaic
+  layouts with edge-aware operator arrangement, editable rows, columns and sections, stable panel
+  grouping, dense-page filler
   control, native sortable/filterable/pageable data tables, and an immersive typed node-graph
   editor with groups, comments, reroutes, a searchable palette, and JSON interchange. Tables keep
   stable selection, rich expandable details, linked/copyable cells, and inline actions; controls
-  and logs are searchable; defaults and persisted preferences are validated and typed; and
-  consequential process, download, and cache actions require confirmation.
+  and logs are searchable; high-impact Axolotl controls expose contextual help on hover/focus;
+  defaults and persisted preferences are validated and typed; and consequential process, download,
+  and cache actions require confirmation.
 - Hugging Face model/dataset search in a responsive master/detail workspace with a dominant
   repository table and a unified operations rail for atomic search/exact-repository queries,
-  selected-repository actions, and advanced filters. The rail stacks below results on compact
-  screens. Search and repository-target types remain independent; typed sorting, local metadata
-  filters, model
-  VRAM/data-size fit; compatibility classification; stable row selection; automatic metadata
-  hydration for each visible result page; rich expandable metadata/file/lineage views; in-place
-  inspect/copy/queue/config actions; fine-tune lookup; and filtered `snapshot_download` downloads
+  selected-repository state, and contextual actions. Advanced filters now live in an interactive
+  pinned popover, keeping the rail focused while retaining an atomic two-column filter workspace;
+  the rail stacks below results on compact screens. Search and repository-target types remain
+  independent; cross-type stale artifact filters are neutralized; typed sorting, local metadata
+  filters, model VRAM/data-size fit, compatibility classification, stable row selection, automatic
+  metadata hydration for each visible result page, rich expandable metadata/file/lineage views,
+  in-place inspect/copy/queue/config actions; fine-tune lookup; and filtered `snapshot_download`
+  downloads
   into the standard HF cache. Transfer monitoring now lives beside cache operations on the
   Content page.
 - The workflow graph and control selections (search query, filters, sort, run action and args,

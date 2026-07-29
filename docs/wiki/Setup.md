@@ -128,8 +128,9 @@ The Setup page separates starter choices from raw Axolotl fields:
 ## LCARS WebUI
 
 This app uses [LCARS WebUI](https://github.com/darsrc/LCARS-WebUI). `requirements.txt` installs the
-tested v4.4.0 tag directly from GitHub for reproducible installs. For local LCARS WebUI development,
-install your checkout into the venv in editable mode after installing requirements:
+tested post-v4.4.0 commit `c0171c7` directly from GitHub for reproducible installs. For local LCARS
+WebUI development, install your checkout into the venv in editable mode after installing
+requirements:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui

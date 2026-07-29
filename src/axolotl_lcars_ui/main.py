@@ -11,7 +11,7 @@ import time
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import lcars_ui as lcars
 import uvicorn
@@ -965,6 +965,10 @@ def _lora_setup_page() -> None:
                             message="Use 2–63 letters, numbers, spaces, dashes, or underscores.",
                         ),
                     ),
+                    hint=(
+                        "This safe project slug names the starter config, local JSONL dataset, "
+                        "training output directory, and eventual Ollama adapter."
+                    ),
                 )
                 goal = lcars.radio(
                     "What Are You Teaching?",
@@ -984,6 +988,10 @@ def _lora_setup_page() -> None:
                             "adapter to one narrow capability."
                         )
                     ),
+                    hint=(
+                        "Choose the closest teaching goal. It changes the starter examples and "
+                        "guidance, while the resulting LoRA can still learn varied behavior."
+                    ),
                 )
                 base_model = lcars.select(
                     "Base Model Template",
@@ -996,6 +1004,10 @@ def _lora_setup_page() -> None:
                             "Known Qwen 3.5/3.6 and Gemma 4 choices also apply their required chat "
                             "format and safe text-backbone LoRA targets automatically."
                         ),
+                    ),
+                    hint=(
+                        "Known templates safely coordinate chat format, architecture-specific target "
+                        "modules, and the recommended first recipe."
                     ),
                 )
                 recommended_key = recommend_lora_preset(
@@ -1012,6 +1024,10 @@ def _lora_setup_page() -> None:
                             "Start with the recommended recipe. Change one setting only after a "
                             "measured problem such as out-of-memory, truncation, or underfitting."
                         )
+                    ),
+                    hint=(
+                        "A smart preset sets quantization, rank, context, effective batch, optimizer, "
+                        "precision, checkpoints, and output paths as one coherent recipe."
                     ),
                 )
             if _is_active_action("lora-setup-save"):
@@ -1293,6 +1309,10 @@ def _lora_data_page() -> None:
                             "Only completed Hugging Face dataset downloads appear here."
                         ),
                     ),
+                    hint=(
+                        "This list includes only complete, readable dataset snapshots from the "
+                        "standard Hugging Face cache; interrupted downloads stay unavailable."
+                    ),
                 )
                 downloaded_format = lcars.select(
                     "What Does One Row Look Like?",
@@ -1304,6 +1324,10 @@ def _lora_data_page() -> None:
                             "Pick by column names, not by the subject of the dataset. "
                             "The descriptions show the expected fields."
                         )
+                    ),
+                    hint=(
+                        "Inspect one dataset row and choose its actual column shape: OpenAI messages, "
+                        "ShareGPT conversations, Alpaca instructions, or plain text."
                     ),
                 )
                 downloaded_split = lcars.text_input(
@@ -1318,6 +1342,10 @@ def _lora_data_page() -> None:
                         ),
                         validation=lcars.ValidationOptions(required=True),
                     ),
+                    hint=(
+                        "Use train for the full split, or a datasets slice such as train[:10%] for "
+                        "a fast pipeline check before committing to the full corpus."
+                    ),
                 )
                 downloaded_subset = lcars.text_input(
                     "Dataset Subset / Config · optional",
@@ -1330,6 +1358,10 @@ def _lora_data_page() -> None:
                             "Some repositories contain named configurations such as default, "
                             "en, or cleaned. This is not the train/validation split."
                         )
+                    ),
+                    hint=(
+                        "Only set this when the dataset card lists a named subset/configuration. "
+                        "It is separate from the train, validation, or test split."
                     ),
                 )
             if _is_active_action("lora-use-downloaded-dataset"):
@@ -2878,18 +2910,31 @@ def _hub_page() -> None:
                     autocomplete=False,
                     id="hf-query",
                     options=SEARCH_INPUT_OPTIONS,
+                    hint=(
+                        "Search Hub accepts keywords such as “qwen instruct”. Exact Repository "
+                        "expects an owner/name id such as Qwen/Qwen3.5-4B."
+                    ),
                 )
                 query_mode = lcars.select(
                     "Mode",
                     HF_QUERY_MODE_OPTIONS,
                     value=HF_QUERY_MODE_OPTIONS[0],
                     id="hf-query-mode",
+                    hint=(
+                        "Search Hub returns a ranked result set. Inspect Exact Repository loads one "
+                        "known owner/name id and its file manifest directly."
+                    ),
                 )
                 search_repo_type = lcars.select(
                     "Repo Type",
                     ["model", "dataset"],
                     value=STATE.hf.last_repo_type,
                     id="hf-search-repo-type",
+                    hint=(
+                        "Choose model for base checkpoints and adapters, or dataset for training "
+                        "corpora. This changes the search without silently retargeting a prior "
+                        "selection."
+                    ),
                 )
                 _seed_text("hf-revision", "")
                 revision = lcars.text_input(
@@ -2898,6 +2943,10 @@ def _hub_page() -> None:
                     autocomplete=False,
                     id="hf-revision",
                     options=COMMAND_INPUT_OPTIONS,
+                    hint=(
+                        "Leave blank for the repository default. For exact, reproducible work use "
+                        "a branch, tag, commit SHA, or refs/pr/... revision."
+                    ),
                 )
             if _is_active_action("hf-search") or _is_active_action("hf-query"):
                 if query_mode == HF_QUERY_MODE_OPTIONS[1]:
@@ -2937,7 +2986,40 @@ def _hub_page() -> None:
                 size="h4",
                 color="tanoi",
                 id="hf-selected-heading",
+                hint=(
+                    "Selection is independent from the current search type and filters, so a saved "
+                    "target remains available while you explore another result set."
+                ),
             )
+            selection_value, selection_detail, selection_status = _hf_selection_metric(
+                repo_id,
+                target_repo_type,
+                selected_result,
+            )
+            lcars.metric(
+                "Selection State",
+                selection_value,
+                status=selection_status,
+                color="tanoi",
+                id="hf-selection-status",
+                options=lcars.MetricOptions(secondary_value=selection_detail),
+            )
+            with lcars.hint(
+                "hf-selection-status",
+                title="Selection Workflow",
+                trigger=["hover", "press"],
+                placement="left",
+                max_width=460,
+            ):
+                lcars.markdown(
+                    "1. **Select** a row to make it the command target.\n"
+                    "2. **Expand** it to inspect compatibility, lineage, and exact files.\n"
+                    "3. **Use** it in the active Axolotl config or **download** only compatible "
+                    "files.\n\n"
+                    "◆ marks a repository already used by the active config. ● marks a repository "
+                    "whose exact manifest has been inspected.",
+                    id="hf-selection-guide",
+                )
             lcars.text(
                 repo_id or "No repository selected.",
                 size="mono",
@@ -2946,12 +3028,20 @@ def _hub_page() -> None:
                     repo_id,
                     target_repo_type,
                 ),
+                hint=(
+                    "This owner/name id is the target for the three actions below. Use its inline "
+                    "copy control or open the linked Hugging Face page."
+                ),
             )
             if lcars.button(
                 "Find Fine-Tunes",
                 color="lilac",
                 id="hf-related",
                 disabled=not bool(repo_id.strip()) or target_repo_type != "model",
+                hint=(
+                    "Search model lineage and naming metadata for compatible descendants of the "
+                    "selected base model, then expose them inside the expanded result."
+                ),
             ):
                 _hf_related_action(repo_id)
             if lcars.button(
@@ -2964,6 +3054,10 @@ def _hub_page() -> None:
                     debounce_ms=750,
                     busy_label="Queueing",
                 ),
+                hint=(
+                    "Queue only Axolotl-relevant configs, tokenizer support, and trainable weights "
+                    "or dataset files. Track progress and cache use on Content."
+                ),
             ):
                 _hf_download_action(repo_id, target_repo_type, revision)
             if lcars.button(
@@ -2971,74 +3065,158 @@ def _hub_page() -> None:
                 color="tanoi",
                 id="hf-use-repo",
                 disabled=not bool(repo_id.strip()) or selected_blocked,
+                hint=(
+                    "Apply a base model, PEFT adapter, or dataset to the correct active YAML field, "
+                    "then immediately rerun preflight."
+                ),
             ):
                 _hf_use_repo_action(repo_id, target_repo_type)
 
-            with lcars.form(
-                "Result Filters",
-                action_id="hf-filter-results",
-                submit_label="Apply / Refresh Results",
-                id="hf-filter-form",
+            lcars.header(
+                "Result Refinement",
+                size="h4",
                 color="blue-bell",
-                options=lcars.FormOptions(layout="grid", columns=1),
+                id="hf-filter-heading",
+                hint=(
+                    "Refinement reruns the saved query and applies Hub ordering, compatibility, "
+                    "metadata, artifact, weight-format, and model-fit constraints atomically."
+                ),
+            )
+            lcars.button(
+                "Refine Results",
+                color="blue-bell",
+                id="hf-refine-results",
+                hint=(
+                    "Open the advanced filter workspace. Its controls live in this pinned popover "
+                    "so the main operations rail stays focused on search and repository actions."
+                ),
+            )
+            with lcars.hint(
+                "hf-refine-results",
+                title="Advanced Result Filters",
+                trigger=["click", "press"],
+                placement="left",
+                max_width=620,
             ):
-                sort = lcars.select(
-                    "Hub Sort",
-                    HF_SORT_OPTIONS,
-                    value=HF_SORT_OPTIONS[0],
-                    id="hf-sort",
-                )
-                compatibility = lcars.select(
-                    "Compatibility",
-                    HF_COMPATIBILITY_OPTIONS,
-                    value=HF_COMPATIBILITY_OPTIONS[0],
-                    id="hf-compatibility",
-                )
-                limit = lcars.select(
-                    "Result Limit",
-                    HF_LIMIT_OPTIONS,
-                    value=HF_LIMIT_OPTIONS[0],
-                    id="hf-limit",
-                )
-                _seed_text("hf-sift", "")
-                sift = lcars.text_input(
-                    "Metadata Contains",
-                    placeholder="repo, tag, quant, family",
-                    autocomplete=False,
-                    id="hf-sift",
-                    options=SEARCH_INPUT_OPTIONS,
-                )
-                artifact_filter = lcars.select(
-                    "Artifact",
-                    HF_ARTIFACT_FILTER_OPTIONS,
-                    value=HF_ARTIFACT_FILTER_OPTIONS[0],
-                    id="hf-artifact-filter",
-                )
-                quant_filter = lcars.select(
-                    "Weight Format",
-                    HF_QUANT_FILTER_OPTIONS,
-                    value=HF_QUANT_FILTER_OPTIONS[0],
-                    id="hf-quant-filter",
-                )
-                vram_limit = lcars.number_input(
-                    "Model VRAM Budget",
-                    value=float(STATE.hf.vram_limit_gb or 24),
-                    min=1,
-                    max=256,
-                    step=1,
-                    id="hf-vram-limit",
-                    options=lcars.NumberInputOptions(
-                        precision=0,
-                        suffix=" GB",
-                        required=True,
+                with lcars.form(
+                    "Refine Current Query",
+                    action_id="hf-filter-results",
+                    submit_label="Apply / Refresh Results",
+                    id="hf-filter-form",
+                    color="blue-bell",
+                    options=lcars.FormOptions(
+                        layout="grid",
+                        columns=2,
+                        description=(
+                            "All values are submitted together, then the visible page is hydrated "
+                            "with exact metadata before local filters are evaluated."
+                        ),
                     ),
-                )
-                fit_filter = lcars.select(
-                    "Model VRAM Fit",
-                    HF_FIT_FILTER_OPTIONS,
-                    value="any",
-                    id="hf-fit-filter",
-                )
+                ):
+                    sort = lcars.select(
+                        "Hub Sort",
+                        HF_SORT_OPTIONS,
+                        value=HF_SORT_OPTIONS[0],
+                        id="hf-sort",
+                        hint=(
+                            "Ordering sent to Hugging Face before exact metadata is hydrated. "
+                            "Clicking a visible table column then applies a local sort."
+                        ),
+                    )
+                    compatibility = lcars.select(
+                        "Compatibility",
+                        HF_COMPATIBILITY_OPTIONS,
+                        value=HF_COMPATIBILITY_OPTIONS[0],
+                        id="hf-compatibility",
+                        hint=(
+                            "Compatible-only hides known runtime-only artifacts. Include warnings "
+                            "when auditing GGUF, incomplete, or unusual repositories."
+                        ),
+                    )
+                    limit = lcars.select(
+                        "Result Limit",
+                        HF_LIMIT_OPTIONS,
+                        value=HF_LIMIT_OPTIONS[0],
+                        id="hf-limit",
+                        hint=(
+                            "Maximum lightweight results requested from the Hub. Exact metadata is "
+                            "hydrated one visible table page at a time."
+                        ),
+                    )
+                    _seed_text("hf-sift", "")
+                    sift = lcars.text_input(
+                        "Metadata Contains",
+                        placeholder="repo, tag, quant, family",
+                        autocomplete=False,
+                        id="hf-sift",
+                        options=SEARCH_INPUT_OPTIONS,
+                        hint=(
+                            "Case-insensitive local match across repository id, tags, pipeline, "
+                            "library, weights, quantization, and compatibility."
+                        ),
+                    )
+                    artifact_filter = lcars.select(
+                        "Artifact",
+                        HF_ARTIFACT_FILTER_OPTIONS,
+                        value=HF_ARTIFACT_FILTER_OPTIONS[0],
+                        id="hf-artifact-filter",
+                        hint=(
+                            "Narrow models, PEFT adapters, datasets, or runtime-only artifacts "
+                            "after repository metadata has been classified."
+                        ),
+                    )
+                    quant_filter = lcars.select(
+                        "Weight Format",
+                        HF_QUANT_FILTER_OPTIONS,
+                        value=HF_QUANT_FILTER_OPTIONS[0],
+                        id="hf-quant-filter",
+                        hint=(
+                            "Filter model weight formats. Dataset searches ignore this model-only "
+                            "constraint rather than disappearing unexpectedly."
+                        ),
+                    )
+                    vram_limit = lcars.number_input(
+                        "Model VRAM Budget",
+                        value=float(STATE.hf.vram_limit_gb or 24),
+                        min=1,
+                        max=256,
+                        step=1,
+                        id="hf-vram-limit",
+                        options=lcars.NumberInputOptions(
+                            precision=0,
+                            suffix=" GB",
+                            required=True,
+                        ),
+                        hint=(
+                            "A first-pass fit comparison against known model weight bytes. It is "
+                            "guidance, not a guarantee of training memory use."
+                        ),
+                    )
+                    fit_filter = lcars.select(
+                        "Model VRAM Fit",
+                        HF_FIT_FILTER_OPTIONS,
+                        value="any",
+                        id="hf-fit-filter",
+                        hint=(
+                            "Keep every model, only models with known size, or only weights within "
+                            "the stated VRAM budget. Dataset rows report data size instead."
+                        ),
+                    )
+            lcars.text(
+                _current_hf_filter_summary(),
+                size="mono",
+                color="blue-bell",
+                id="hf-filter-summary",
+                options=lcars.TextOptions(
+                    wrap="wrap",
+                    max_lines=4,
+                    selectable=False,
+                ),
+                hint=(
+                    "This is the saved atomic refinement state. Open Refine Results to change it; "
+                    "table-header sorting can then reorder the visible hydrated rows locally."
+                ),
+            )
             if _is_active_action("hf-filter-results"):
                 _set_widget_value("hf-query-mode", HF_QUERY_MODE_OPTIONS[0])
                 _hf_search_action(
@@ -3974,6 +4152,107 @@ def _hf_selected_text_options(repo_id: str, repo_type: str) -> lcars.TextOptions
     )
 
 
+def _hf_selection_metric(
+    repo_id: str,
+    repo_type: str,
+    result: Any,
+) -> tuple[str, str, Literal["ok", "warn", "crit"]]:
+    """Summarize the command target without conflating it with the active search."""
+
+    repo_id = repo_id.strip()
+    type_label = "DATASET" if repo_type == "dataset" else "MODEL"
+    if not repo_id:
+        return (
+            "NO TARGET",
+            "Select a result row or inspect an exact owner/repository id.",
+            "warn",
+        )
+    if result is None:
+        return (
+            f"{type_label} · SAVED TARGET",
+            "Expand or inspect this repository to classify its files and compatibility.",
+            "warn",
+        )
+
+    role_labels = {
+        "base_model": "BASE MODEL",
+        "peft_adapter": "PEFT ADAPTER",
+        "runtime_quant": "RUNTIME ONLY",
+        "dataset": "DATASET",
+    }
+    parts = [type_label]
+    role = role_labels.get(str(result.role), "")
+    if role and role != type_label:
+        parts.append(role)
+    if result.fit:
+        parts.append(str(result.fit).upper())
+    if result.file_count:
+        parts.append(f"{result.file_count:,} FILES")
+
+    detail = str(result.compatibility or "Repository metadata loaded.")
+    if result.blocked:
+        status: Literal["ok", "warn", "crit"] = "crit"
+    elif detail.startswith("OK"):
+        status = "ok"
+    else:
+        status = "warn"
+    return " · ".join(parts), detail, status
+
+
+def _effective_hf_artifact_filter(repo_type: str, artifact_filter: str) -> str:
+    """Prevent a saved model/dataset-only filter from blanking the opposite search type."""
+
+    value = artifact_filter or HF_ARTIFACT_FILTER_OPTIONS[0]
+    if repo_type == "dataset" and value not in {"any", "any artifact", "datasets"}:
+        return HF_ARTIFACT_FILTER_OPTIONS[0]
+    if repo_type == "model" and value == "datasets":
+        return HF_ARTIFACT_FILTER_OPTIONS[0]
+    return value
+
+
+def _current_hf_filter_summary() -> str:
+    repo_type = _widget_value("hf-search-repo-type", STATE.hf.last_repo_type)
+    sort = _widget_value("hf-sort", HF_SORT_OPTIONS[0]).replace("_", " ")
+    limit = _widget_value("hf-limit", HF_LIMIT_OPTIONS[0])
+    compatibility = _widget_value(
+        "hf-compatibility",
+        HF_COMPATIBILITY_OPTIONS[0],
+    )
+    artifact = _effective_hf_artifact_filter(
+        repo_type,
+        _widget_value("hf-artifact-filter", HF_ARTIFACT_FILTER_OPTIONS[0]),
+    )
+    quant = _widget_value("hf-quant-filter", HF_QUANT_FILTER_OPTIONS[0])
+    fit = _widget_value("hf-fit-filter", HF_FIT_FILTER_OPTIONS[0])
+    sift = _widget_value("hf-sift", "").strip()
+    vram = _widget_value(
+        "hf-vram-limit",
+        str(STATE.hf.vram_limit_gb or 24),
+    )
+
+    parts = [
+        f"{limit} {repo_type} results",
+        f"Hub sort {sort}",
+        (
+            "compatible only"
+            if compatibility == HF_COMPATIBILITY_OPTIONS[0]
+            else "warnings + blocked included"
+        ),
+    ]
+    if sift:
+        parts.append(f"metadata contains {sift}")
+    if artifact not in {"any", "any artifact"}:
+        parts.append(artifact)
+    if repo_type == "model":
+        if quant != HF_QUANT_FILTER_OPTIONS[0]:
+            parts.append(quant)
+        if fit != HF_FIT_FILTER_OPTIONS[0]:
+            parts.append(f"{fit} @ {vram}GB")
+        else:
+            parts.append(f"{vram}GB fit reference")
+    return "ACTIVE FILTERS · " + " · ".join(parts)
+
+
 def _ollama_rule_rows() -> list[dict[str, str]]:
     return [
         {
@@ -4614,6 +4893,11 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
     value = STATE.config_store.control_value(spec, cfg)
     label = _field_label(spec)
     help_text = _field_help(spec)
+    hint_text = (
+        help_text
+        if spec.key in CONFIG_FIELD_HINTS or lora_tuning_hint(spec.key)
+        else None
+    )
     if spec.kind in {"text", "csv_list", "json"}:
         # force: the active YAML owns config values, so a rebuilt manifest must not
         # keep showing what the previous build seeded.
@@ -4633,6 +4917,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                         required=spec.key in SETUP_REQUIRED_KEYS,
                     ),
                 ),
+                hint=hint_text,
             )
         return lcars.text_input(
             label,
@@ -4646,6 +4931,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                     required=spec.key in SETUP_REQUIRED_KEYS,
                 ),
             ),
+            hint=hint_text,
         )
     if spec.kind == "number":
         if spec.optional:
@@ -4667,6 +4953,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                         message="Enter a number or leave the field empty.",
                     ),
                 ),
+                hint=hint_text,
             )
         return lcars.number_input(
             label,
@@ -4680,6 +4967,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                 required=True,
                 description=help_text,
             ),
+            hint=hint_text,
         )
     if spec.kind == "bool":
         return lcars.toggle(
@@ -4691,6 +4979,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
                 off_label="Disabled",
                 description=help_text,
             ),
+            hint=hint_text,
         )
     if spec.kind == "tri_bool":
         selected = str(value if value not in (None, "") else "unset")
@@ -4718,6 +5007,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             value=selected,
             id=spec.widget_id,
             settings=lcars.ChoiceOptions(description=help_text),
+            hint=hint_text,
         )
     selected = str(value if value not in (None, "") else (spec.default or ""))
     return lcars.select(
@@ -4729,6 +5019,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
             searchable=len(spec.options) > 6,
             description=help_text,
         ),
+        hint=hint_text,
     )
 
 
@@ -4793,9 +5084,25 @@ def _config_page_actions(suffix: str) -> None:
         group=f"{suffix}-fields",
         options=COLLAPSIBLE_PANEL_OPTIONS,
     ):
-        if lcars.button("Save Config", color="tanoi", id=f"config-save-{suffix}"):
+        if lcars.button(
+            "Save Config",
+            color="tanoi",
+            id=f"config-save-{suffix}",
+            hint=(
+                "Write every structured control on this page into the active YAML while preserving "
+                "fields owned by the other config pages."
+            ),
+        ):
             _save_config_action()
-        if lcars.button("Run Preflight", color="anakiwa", id=f"config-preflight-{suffix}"):
+        if lcars.button(
+            "Run Preflight",
+            color="anakiwa",
+            id=f"config-preflight-{suffix}",
+            hint=(
+                "Validate model, dataset, precision, attention, distributed, resume, auth, and "
+                "integration settings without starting Axolotl."
+            ),
+        ):
             _run_preflight_action()
         lcars.markdown(
             "[Raw YAML editor](/raw)",
@@ -5584,6 +5891,13 @@ def _hf_search_action(
         return
     _set_widget_value("hf-query", query)
     _set_widget_value("hf-search-repo-type", repo_type)
+    effective_artifact_filter = _effective_hf_artifact_filter(
+        repo_type,
+        artifact_filter,
+    )
+    if effective_artifact_filter != artifact_filter:
+        _set_widget_value("hf-artifact-filter", effective_artifact_filter)
+        lcars.update("hf-artifact-filter", value=effective_artifact_filter)
     vram = _optional_float(vram_limit)
     results = STATE.hf.search(
         query,
@@ -5598,7 +5912,7 @@ def _hf_search_action(
         text=sift,
         sort=local_sort,
         descending=_kept_sort_direction(local_sort),
-        artifact_filter=artifact_filter,
+        artifact_filter=effective_artifact_filter,
         quant_filter=quant_filter,
         fit_filter=fit_filter,
         vram_limit_gb=vram,
@@ -6237,6 +6551,11 @@ def _update_hf_widgets() -> None:
     repo_id = STATE.hf.last_repo_id.strip()
     result = _hf_result_for(repo_id)
     blocked = bool(result is not None and result.blocked)
+    selection_value, selection_detail, selection_status = _hf_selection_metric(
+        repo_id,
+        STATE.hf.last_repo_type,
+        result,
+    )
     lcars.update(
         HF_RESULTS_TABLE_ID,
         headers=[column.label or column.key for column in result_options_model.columns or []],
@@ -6257,6 +6576,18 @@ def _update_hf_widgets() -> None:
     lcars.update("hf-download", disabled=not bool(repo_id) or blocked)
     lcars.update("hf-use-repo", disabled=not bool(repo_id) or blocked)
     lcars.update("hf-use-local", disabled=not bool(STATE.hf.last_local_path))
+    lcars.update(
+        "hf-selection-status",
+        value=selection_value,
+        status=selection_status,
+        options=lcars.MetricOptions(
+            secondary_value=selection_detail,
+        ).model_dump(mode="json"),
+    )
+    lcars.update(
+        "hf-filter-summary",
+        content=_current_hf_filter_summary(),
+    )
     lcars.update(
         "hf-selected-repo-copy",
         content=STATE.hf.last_repo_id.strip() or "No repository selected.",

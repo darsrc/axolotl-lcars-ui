@@ -42,6 +42,10 @@ def _manifest_widgets(manifest: object) -> dict[str, object]:
                 nested = getattr(item, attribute, None)
                 if isinstance(nested, list):
                     visit(nested)
+            hint = getattr(item, "hint", None)
+            hint_children = getattr(hint, "children", None)
+            if isinstance(hint_children, list):
+                visit(hint_children)
 
     for page in getattr(manifest, "pages").values():
         for row in page.rows:
@@ -58,6 +62,9 @@ class V44UiTests(unittest.TestCase):
 
     def test_project_builds_with_lcars_v44(self) -> None:
         self.assertEqual(lcars.__version__, "4.4.0")
+        self.assertTrue(hasattr(lcars, "Hint"))
+        self.assertTrue(callable(lcars.hint))
+        self.assertTrue(callable(lcars.show_hint))
         self.assertEqual(len(self.manifest.pages), 18)
 
     def test_beginner_lora_studio_exposes_the_four_step_flow(self) -> None:
@@ -527,6 +534,7 @@ class V44UiTests(unittest.TestCase):
         filter_form = self.widgets["hf-filter-form"]
         self.assertEqual(filter_form.type, "form")
         self.assertEqual(filter_form.action_id, "hf-filter-results")
+        self.assertEqual(filter_form.options.columns, 2)
         self.assertEqual(
             {child.id for child in filter_form.children},
             {
@@ -540,6 +548,14 @@ class V44UiTests(unittest.TestCase):
                 "hf-fit-filter",
             },
         )
+        refine = self.widgets["hf-refine-results"]
+        self.assertEqual(refine.hint.title, "Advanced Result Filters")
+        self.assertEqual(refine.hint.trigger, ["click", "press"])
+        self.assertIn(filter_form, refine.hint.children)
+        self.assertTrue(self.widgets["hf-query"].hint.text)
+        self.assertTrue(self.widgets["hf-selection-status"].hint.children)
+        self.assertIn("ACTIVE FILTERS", self.widgets["hf-filter-summary"].content)
+        self.assertIn("Axolotl key:", self.widgets["cfg-base-model"].hint.text)
         self.assertEqual(
             self.widgets["hf-query-mode"].value,
             main.HF_QUERY_MODE_OPTIONS[0],
@@ -754,6 +770,108 @@ class V44UiTests(unittest.TestCase):
             self.assertNotIn("value", updates["cfg-load-in-8bit"])
             self.assertTrue(updates["active-config-select"]["options"])
         finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_hf_selection_metric_distinguishes_saved_ready_and_blocked_targets(self) -> None:
+        value, detail, status = main._hf_selection_metric(
+            "example/saved",
+            "model",
+            None,
+        )
+        self.assertEqual(value, "MODEL · SAVED TARGET")
+        self.assertIn("inspect", detail.lower())
+        self.assertEqual(status, "warn")
+
+        ready = SearchResult(
+            repo_id="example/ready",
+            repo_type="model",
+            role="base_model",
+            fit="fits 24GB",
+            file_count=8,
+            compatibility="OK: Transformers weights",
+        )
+        value, detail, status = main._hf_selection_metric(
+            ready.repo_id,
+            ready.repo_type,
+            ready,
+        )
+        self.assertIn("BASE MODEL", value)
+        self.assertIn("8 FILES", value)
+        self.assertEqual(detail, ready.compatibility)
+        self.assertEqual(status, "ok")
+
+        blocked = SearchResult(
+            repo_id="example/runtime",
+            repo_type="model",
+            role="runtime_quant",
+            compatibility="Blocked: not an Axolotl base_model",
+            blocked=True,
+        )
+        _, _, status = main._hf_selection_metric(
+            blocked.repo_id,
+            blocked.repo_type,
+            blocked,
+        )
+        self.assertEqual(status, "crit")
+
+    def test_hf_cross_type_search_neutralizes_stale_artifact_filter(self) -> None:
+        self.assertEqual(
+            main._effective_hf_artifact_filter("dataset", "base/trainable models"),
+            main.HF_ARTIFACT_FILTER_OPTIONS[0],
+        )
+        self.assertEqual(
+            main._effective_hf_artifact_filter("model", "datasets"),
+            main.HF_ARTIFACT_FILTER_OPTIONS[0],
+        )
+        self.assertEqual(
+            main._effective_hf_artifact_filter("dataset", "datasets"),
+            "datasets",
+        )
+
+    def test_hf_dataset_search_streams_cross_type_filter_reset_into_hint(self) -> None:
+        original_ctx = get_ctx()
+        original_vram = main.STATE.hf.vram_limit_gb
+        session_id = "hf-cross-type-filter"
+        result = SearchResult(repo_id="example/dataset", repo_type="dataset")
+        try:
+            clear_session_state(session_id)
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id="hf-search",
+                )
+            )
+            with (
+                patch.object(main.STATE.hf, "search", return_value=[result]),
+                patch.object(main.STATE.hf, "hydrate_results", return_value=1),
+                patch.object(main.STATE.hf, "sift_results", return_value=[result]) as sift,
+                patch.object(main, "_update_hf_widgets"),
+                patch.object(main, "_append_hf_logs"),
+                patch.object(main.lcars, "update") as update,
+            ):
+                main._hf_search_action(
+                    "example",
+                    "dataset",
+                    artifact_filter="base/trainable models",
+                    vram_limit=24,
+                )
+
+            self.assertEqual(
+                sift.call_args.kwargs["artifact_filter"],
+                main.HF_ARTIFACT_FILTER_OPTIONS[0],
+            )
+            update.assert_any_call(
+                "hf-artifact-filter",
+                value=main.HF_ARTIFACT_FILTER_OPTIONS[0],
+            )
+            self.assertEqual(
+                get_session_state(session_id)["hf-artifact-filter"],
+                main.HF_ARTIFACT_FILTER_OPTIONS[0],
+            )
+        finally:
+            main.STATE.hf.vram_limit_gb = original_vram
             clear_session_state(session_id)
             set_ctx(original_ctx)
 
