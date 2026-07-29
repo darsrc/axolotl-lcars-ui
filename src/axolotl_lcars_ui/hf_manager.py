@@ -252,7 +252,7 @@ class HuggingFaceManager:
             if fit_filter == "known size" and result.fit == "unknown":
                 continue
             results.append(result)
-        results.sort(key=_sort_key(sort), reverse=descending)
+        results = sorted_search_results(results, sort, descending=descending)
         current_key = (self.last_repo_type, self.last_repo_id)
         with self._lock:
             self.search_results = results
@@ -283,10 +283,10 @@ class HuggingFaceManager:
         sort = _normalize_local_sort(sort)
         descending = default_sort_descending(sort) if descending is None else descending
         with self._lock:
-            self.search_results = sorted(
+            self.search_results = sorted_search_results(
                 self.search_results,
-                key=_sort_key(sort),
-                reverse=descending,
+                sort,
+                descending=descending,
             )
             self.local_sort = sort
             self.local_sort_desc = descending
@@ -1004,6 +1004,19 @@ def default_sort_descending(sort: str) -> bool:
     """Natural first-click direction: A-Z for names, largest/newest first otherwise."""
 
     return sort not in {"repo", "updated_asc"}
+
+
+def sorted_search_results(
+    results: list[SearchResult],
+    sort: str,
+    *,
+    descending: bool | None = None,
+) -> list[SearchResult]:
+    """Return a stable copy ordered by the same rules used by the Hub table."""
+
+    sort = _normalize_local_sort(sort)
+    descending = default_sort_descending(sort) if descending is None else descending
+    return sorted(results, key=_sort_key(sort), reverse=descending)
 
 
 def _sort_key(sort: str):

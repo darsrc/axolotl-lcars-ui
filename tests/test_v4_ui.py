@@ -1281,6 +1281,69 @@ class V44UiTests(unittest.TestCase):
             main.STATE.hf.last_repo_id = original_repo_id
             main.STATE.hf.last_repo_type = original_repo_type
 
+    def test_hf_visible_results_sort_an_exact_inspection_with_search_rows(self) -> None:
+        original_results = main.STATE.hf.search_results
+        original_details = main.STATE.hf.selected_details
+        original_sort = main.STATE.hf.local_sort
+        original_descending = main.STATE.hf.local_sort_desc
+        searched = [
+            SearchResult(repo_id="bravo/model", repo_type="model"),
+            SearchResult(repo_id="charlie/model", repo_type="model"),
+        ]
+        inspected = SearchResult(repo_id="alpha/model", repo_type="model")
+        try:
+            main.STATE.hf.search_results = searched
+            main.STATE.hf.selected_details = RepoDetails(result=inspected, files=[])
+            main.STATE.hf.local_sort = "repo"
+            main.STATE.hf.local_sort_desc = True
+
+            visible = main._hf_visible_results()
+        finally:
+            main.STATE.hf.search_results = original_results
+            main.STATE.hf.selected_details = original_details
+            main.STATE.hf.local_sort = original_sort
+            main.STATE.hf.local_sort_desc = original_descending
+
+        self.assertEqual(
+            [result.repo_id for result in visible],
+            ["charlie/model", "bravo/model", "alpha/model"],
+        )
+
+    def test_hf_cleared_client_sort_toggles_the_server_direction(self) -> None:
+        original_ctx = get_ctx()
+        original_sort = main.STATE.hf.local_sort
+        original_descending = main.STATE.hf.local_sort_desc
+        session_id = "table-cleared-sort"
+        try:
+            clear_session_state(session_id)
+            main.STATE.hf.local_sort = "files"
+            main.STATE.hf.local_sort_desc = False
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id=main.HF_RESULTS_TABLE_ID,
+                    active_action_value={
+                        "kind": "sort",
+                        "state": {
+                            "sort": [],
+                            "page": 1,
+                            "page_size": 25,
+                            "expanded_ids": [],
+                        },
+                    },
+                )
+            )
+            with patch.object(main, "_hf_sort_action") as sort:
+                main._handle_hf_table_action()
+
+            sort.assert_called_once_with("files", descending=True)
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+            main.STATE.hf.local_sort = original_sort
+            main.STATE.hf.local_sort_desc = original_descending
+
     def test_hf_table_page_event_hydrates_the_new_visible_slice(self) -> None:
         original_ctx = get_ctx()
         original_results = main.STATE.hf.search_results
@@ -1335,6 +1398,50 @@ class V44UiTests(unittest.TestCase):
                 get_session_state(session_id)[main.HF_RESULTS_PAGE_SIZE_KEY],
                 "25",
             )
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+            main.STATE.hf.search_results = original_results
+            main.STATE.hf.expanded_result_ids = original_expanded
+
+    def test_hf_cached_page_event_still_streams_the_server_slice(self) -> None:
+        original_ctx = get_ctx()
+        original_results = main.STATE.hf.search_results
+        original_expanded = list(main.STATE.hf.expanded_result_ids)
+        session_id = "table-cached-page"
+        results = [
+            SearchResult(repo_id=f"example/model-{index}", repo_type="model")
+            for index in range(30)
+        ]
+        try:
+            clear_session_state(session_id)
+            main.STATE.hf.search_results = results
+            main.STATE.hf.expanded_result_ids = []
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id=main.HF_RESULTS_TABLE_ID,
+                    active_action_value={
+                        "kind": "page",
+                        "state": {
+                            "page": 2,
+                            "page_size": 25,
+                            "expanded_ids": [],
+                        },
+                    },
+                )
+            )
+            with (
+                patch.object(main.STATE.hf, "hydrate_results", return_value=0) as hydrate,
+                patch.object(main, "_update_hf_widgets") as update,
+                patch.object(main, "_append_hf_logs") as append_logs,
+            ):
+                main._handle_hf_table_action()
+
+            hydrate.assert_called_once_with(results[25:30], limit=25)
+            update.assert_called_once_with()
+            append_logs.assert_not_called()
         finally:
             clear_session_state(session_id)
             set_ctx(original_ctx)

@@ -23,6 +23,7 @@ from axolotl_lcars_ui.config_store import FIELD_SPECS, ConfigError, ConfigStore,
 from axolotl_lcars_ui.hf_manager import (
     HuggingFaceManager,
     cache_summary_text,
+    sorted_search_results,
 )
 from axolotl_lcars_ui.lora_studio import (
     DEFAULT_LORA_PRESET,
@@ -3731,8 +3732,12 @@ def _hf_visible_results() -> list[Any]:
         result.repo_id == details.result.repo_id and result.repo_type == details.result.repo_type
         for result in results
     ):
-        results.insert(0, details.result)
-    return results
+        results.append(details.result)
+    return sorted_search_results(
+        results,
+        STATE.hf.local_sort,
+        descending=STATE.hf.local_sort_desc,
+    )
 
 
 def _hf_result_row_id(result: Any) -> str:
@@ -4150,6 +4155,14 @@ def _handle_hf_table_action() -> None:
                 direction = str(sort_items[0].get("direction") or "")
                 if direction in {"asc", "desc"}:
                     _hf_sort_action(sort_key, descending=direction == "desc")
+            elif isinstance(sort_items, list):
+                # TanStack's third click clears its client sort. This table is
+                # server-owned, so keep header sorting two-state instead of
+                # leaving an arrowless client state over still-sorted rows.
+                _hf_sort_action(
+                    STATE.hf.local_sort,
+                    descending=not STATE.hf.local_sort_desc,
+                )
             return
 
         if kind == "page":
@@ -4157,8 +4170,8 @@ def _handle_hf_table_action() -> None:
                 _hf_visible_page_results(),
                 limit=page_size,
             )
+            _update_hf_widgets()
             if attempted:
-                _update_hf_widgets()
                 _append_hf_logs()
             return
         return

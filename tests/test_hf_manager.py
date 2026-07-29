@@ -6,10 +6,37 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from axolotl_lcars_ui.hf_manager import HuggingFaceManager, SearchResult
+from axolotl_lcars_ui.hf_manager import (
+    HuggingFaceManager,
+    SearchResult,
+    sorted_search_results,
+)
 
 
 class HuggingFaceManagerV44Tests(unittest.TestCase):
+    def test_sorted_search_results_uses_the_requested_column_and_direction(self) -> None:
+        results = [
+            SearchResult(repo_id="zeta/model", repo_type="model", file_count=2),
+            SearchResult(repo_id="alpha/model", repo_type="model", file_count=8),
+            SearchResult(repo_id="middle/model", repo_type="model", file_count=4),
+        ]
+
+        self.assertEqual(
+            [result.repo_id for result in sorted_search_results(results, "repo")],
+            ["alpha/model", "middle/model", "zeta/model"],
+        )
+        self.assertEqual(
+            [
+                result.file_count
+                for result in sorted_search_results(
+                    results,
+                    "files",
+                    descending=True,
+                )
+            ],
+            [8, 4, 2],
+        )
+
     def test_dataset_cache_rows_keeps_ready_and_surfaces_incomplete_downloads(self) -> None:
         manager = HuggingFaceManager()
         with TemporaryDirectory() as temporary_directory:
