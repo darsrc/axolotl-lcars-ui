@@ -720,6 +720,19 @@ class V44UiTests(unittest.TestCase):
             ),
             "experiment.yml",
         )
+        self.assertEqual(
+            choices[main.HF_RESULTS_PAGE_SIZE_KEY],
+            ("10", "25", "50", "100"),
+        )
+        self.assertEqual(
+            main._normalized_persisted_widget_value(
+                main.HF_RESULTS_PAGE_KEY,
+                "not-a-page",
+                defaults=defaults,
+                choices=choices,
+            ),
+            "1",
+        )
 
     def test_legacy_hf_type_preference_migrates_to_search_without_retargeting(self) -> None:
         original_ctx = get_ctx()
@@ -882,6 +895,7 @@ class V44UiTests(unittest.TestCase):
         result = SearchResult(repo_id="example/dataset", repo_type="dataset")
         try:
             clear_session_state(session_id)
+            get_session_state(session_id)[main.HF_RESULTS_PAGE_SIZE_KEY] = "25"
             set_ctx(
                 _LCARSContext(
                     mode=Mode.HANDLE,
@@ -904,7 +918,15 @@ class V44UiTests(unittest.TestCase):
 
             hydrate.assert_called_once_with(
                 [result],
-                limit=main.HF_RESULTS_PAGE_SIZE,
+                limit=25,
+            )
+            self.assertEqual(
+                get_session_state(session_id)[main.HF_RESULTS_PAGE_KEY],
+                "1",
+            )
+            self.assertEqual(
+                get_session_state(session_id)[main.HF_RESULTS_PAGE_SIZE_KEY],
+                "25",
             )
         finally:
             main.STATE.hf.vram_limit_gb = original_vram
@@ -1263,23 +1285,25 @@ class V44UiTests(unittest.TestCase):
         original_ctx = get_ctx()
         original_results = main.STATE.hf.search_results
         original_expanded = list(main.STATE.hf.expanded_result_ids)
+        session_id = "table-page-hydration"
         results = [
             SearchResult(repo_id=f"example/dataset-{index}", repo_type="dataset")
-            for index in range(15)
+            for index in range(55)
         ]
         try:
+            clear_session_state(session_id)
             main.STATE.hf.search_results = results
             main.STATE.hf.expanded_result_ids = []
             set_ctx(
                 _LCARSContext(
                     mode=Mode.HANDLE,
-                    session_id="table-page-hydration",
+                    session_id=session_id,
                     active_action_id=main.HF_RESULTS_TABLE_ID,
                     active_action_value={
                         "kind": "page",
                         "state": {
                             "page": 2,
-                            "page_size": 10,
+                            "page_size": 25,
                             "expanded_ids": [],
                         },
                     },
@@ -1292,9 +1316,22 @@ class V44UiTests(unittest.TestCase):
             ):
                 main._handle_hf_table_action()
 
-            hydrate.assert_called_once_with(results[10:15], limit=10)
+            hydrate.assert_called_once_with(results[25:50], limit=25)
             update.assert_called_once_with()
+            pagination = main._hf_result_table_options().pagination
+            self.assertIsNotNone(pagination)
+            self.assertEqual(pagination.page, 2)
+            self.assertEqual(pagination.page_size, 25)
+            self.assertEqual(
+                get_session_state(session_id)[main.HF_RESULTS_PAGE_KEY],
+                "2",
+            )
+            self.assertEqual(
+                get_session_state(session_id)[main.HF_RESULTS_PAGE_SIZE_KEY],
+                "25",
+            )
         finally:
+            clear_session_state(session_id)
             set_ctx(original_ctx)
             main.STATE.hf.search_results = original_results
             main.STATE.hf.expanded_result_ids = original_expanded

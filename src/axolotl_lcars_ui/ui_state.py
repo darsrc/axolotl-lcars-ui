@@ -61,6 +61,8 @@ PERSISTED_WIDGET_IDS = frozenset(
         "hf-artifact-filter",
         "hf-quant-filter",
         "hf-fit-filter",
+        "hf-results-page",
+        "hf-results-page-size",
         "hf-repo-id",
         "hf-revision",
         # Content manager

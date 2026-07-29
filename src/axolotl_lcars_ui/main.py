@@ -83,7 +83,10 @@ LOG_HF = "hf-log"
 LOG_OLLAMA = "ollama-test-log"
 WORKFLOW_CANVAS_ID = "axolotl-workflow-canvas"
 HF_RESULTS_TABLE_ID = "hf-results-table"
+HF_RESULTS_PAGE_KEY = "hf-results-page"
+HF_RESULTS_PAGE_SIZE_KEY = "hf-results-page-size"
 HF_RESULTS_PAGE_SIZE = 10
+HF_RESULTS_PAGE_SIZES = (10, 25, 50, 100)
 SEARCH_INPUT_OPTIONS = lcars.TextInputOptions(
     input_type="search",
     commit="enter",
@@ -570,6 +573,8 @@ def _persisted_widget_defaults() -> dict[str, Any]:
         "hf-artifact-filter": HF_ARTIFACT_FILTER_OPTIONS[0],
         "hf-quant-filter": HF_QUANT_FILTER_OPTIONS[0],
         "hf-fit-filter": HF_FIT_FILTER_OPTIONS[0],
+        HF_RESULTS_PAGE_KEY: "1",
+        HF_RESULTS_PAGE_SIZE_KEY: str(HF_RESULTS_PAGE_SIZE),
         "hf-repo-id": STATE.hf.last_repo_id,
         "hf-revision": "",
         "delete-repo-id": STATE.hf.last_repo_id,
@@ -611,6 +616,7 @@ def _persisted_widget_choices() -> dict[str, tuple[str, ...]]:
         "hf-artifact-filter": tuple(HF_ARTIFACT_FILTER_OPTIONS),
         "hf-quant-filter": tuple(HF_QUANT_FILTER_OPTIONS),
         "hf-fit-filter": tuple(HF_FIT_FILTER_OPTIONS),
+        HF_RESULTS_PAGE_SIZE_KEY: tuple(str(size) for size in HF_RESULTS_PAGE_SIZES),
         "delete-repo-type": ("model", "dataset"),
     }
 
@@ -635,6 +641,12 @@ def _normalized_persisted_widget_value(
         if not math.isfinite(number):
             return float(default)
         return max(1.0, min(256.0, number))
+    if widget_id == HF_RESULTS_PAGE_KEY:
+        try:
+            page = int(str(value).strip())
+        except (TypeError, ValueError):
+            return str(default)
+        return str(max(1, min(1000, page)))
     if widget_id in choices:
         selected = str(value) if value is not None else str(default)
         return selected if selected in choices[widget_id] else default
@@ -3552,8 +3564,64 @@ def _hf_job_rows() -> list[dict[str, str]]:
     ]
 
 
+def _hf_results_pagination(total_rows: int | None = None) -> tuple[int, int]:
+    """Return the current session's validated Hub table page and page size."""
+
+    page_size = _bounded_int(
+        _widget_value(HF_RESULTS_PAGE_SIZE_KEY, str(HF_RESULTS_PAGE_SIZE)),
+        default=HF_RESULTS_PAGE_SIZE,
+        minimum=min(HF_RESULTS_PAGE_SIZES),
+        maximum=max(HF_RESULTS_PAGE_SIZES),
+    )
+    if page_size not in HF_RESULTS_PAGE_SIZES:
+        page_size = HF_RESULTS_PAGE_SIZE
+    page = _bounded_int(
+        _widget_value(HF_RESULTS_PAGE_KEY, "1"),
+        default=1,
+        minimum=1,
+        maximum=1000,
+    )
+    if total_rows is not None:
+        page = min(page, max(1, math.ceil(max(0, total_rows) / page_size)))
+    return page, page_size
+
+
+def _remember_hf_results_pagination(table_state: dict[str, Any]) -> tuple[int, int]:
+    """Capture EnhancedTable pagination before a server refresh streams options."""
+
+    current_page, current_page_size = _hf_results_pagination()
+    page_size = _bounded_int(
+        str(table_state.get("page_size") or current_page_size),
+        default=current_page_size,
+        minimum=min(HF_RESULTS_PAGE_SIZES),
+        maximum=max(HF_RESULTS_PAGE_SIZES),
+    )
+    if page_size not in HF_RESULTS_PAGE_SIZES:
+        page_size = current_page_size
+    page = _bounded_int(
+        str(table_state.get("page") or current_page),
+        default=current_page,
+        minimum=1,
+        maximum=1000,
+    )
+    page = min(
+        page,
+        max(1, math.ceil(len(_hf_visible_results()) / page_size)),
+    )
+    _set_session_value(HF_RESULTS_PAGE_KEY, str(page))
+    _set_session_value(HF_RESULTS_PAGE_SIZE_KEY, str(page_size))
+    return page, page_size
+
+
+def _reset_hf_results_page() -> None:
+    """Start a new result set on page one without discarding its page size."""
+
+    _set_session_value(HF_RESULTS_PAGE_KEY, "1")
+
+
 def _hf_result_table_options() -> lcars.TableOptions:
     visible_results = _hf_visible_results()
+    page, page_size = _hf_results_pagination(len(visible_results))
     sort_key = (
         STATE.hf.local_sort
         if STATE.hf.local_sort
@@ -3628,7 +3696,7 @@ def _hf_result_table_options() -> lcars.TableOptions:
             if sort_key in visible_sort_keys
             else []
         ),
-        pagination=lcars.TablePagination(page_size=HF_RESULTS_PAGE_SIZE),
+        pagination=lcars.TablePagination(page=page, page_size=page_size),
         selection=lcars.TableSelection(mode="single", selected_ids=selected_ids),
         expanded_ids=expanded_ids,
         expandable=True,
@@ -4015,6 +4083,7 @@ def _handle_hf_table_action() -> None:
         table_state = payload.get("state")
         if not isinstance(table_state, dict):
             return
+        page, page_size = _remember_hf_results_pagination(table_state)
         expanded_ids = [
             str(row_id)
             for row_id in table_state.get("expanded_ids", [])
@@ -4071,21 +4140,9 @@ def _handle_hf_table_action() -> None:
             return
 
         if kind == "page":
-            page = _bounded_int(
-                str(table_state.get("page") or 1),
-                default=1,
-                minimum=1,
-                maximum=1000,
-            )
-            page_size = _bounded_int(
-                str(table_state.get("page_size") or HF_RESULTS_PAGE_SIZE),
-                default=HF_RESULTS_PAGE_SIZE,
-                minimum=1,
-                maximum=50,
-            )
             start = (page - 1) * page_size
             attempted = STATE.hf.hydrate_results(
-                STATE.hf.search_results[start : start + page_size],
+                _hf_visible_results()[start : start + page_size],
                 limit=page_size,
             )
             if attempted:
@@ -5889,6 +5946,7 @@ def _hf_search_action(
     if repo_type not in {"model", "dataset"}:
         lcars.notify("Repo type must be model or dataset.", level="error")
         return
+    _reset_hf_results_page()
     _set_widget_value("hf-query", query)
     _set_widget_value("hf-search-repo-type", repo_type)
     effective_artifact_filter = _effective_hf_artifact_filter(
@@ -5907,7 +5965,8 @@ def _hf_search_action(
         limit=_bounded_int(limit, default=12, minimum=1, maximum=50),
     )
     STATE.hf.vram_limit_gb = vram
-    STATE.hf.hydrate_results(results, limit=HF_RESULTS_PAGE_SIZE)
+    _, page_size = _hf_results_pagination(len(results))
+    STATE.hf.hydrate_results(results[:page_size], limit=page_size)
     results = STATE.hf.sift_results(
         text=sift,
         sort=local_sort,
@@ -6093,6 +6152,7 @@ def _ollama_search_hf_action(model_name: str) -> None:
             "Ollama model was not found. Refresh and enter the exact name:tag.", level="error"
         )
         return
+    _reset_hf_results_page()
     query = model.hf_query or model.hf_hint or model.name.split(":", 1)[0]
     results = STATE.hf.search(query, "model", limit=12, sort="downloads", compatible_only=True)
     if model.hf_hint and not _looks_gguf(model.hf_hint):
