@@ -76,7 +76,7 @@ The first five navigation items form one guided workflow:
    `lora_target_linear` switch for multimodal models. Use Axolotl 0.16.0 or newer for Qwen 3.5/3.6
    and 0.16.1 or newer for Gemma 4.
 3. **2 · Data** starts by showing the exact source, route, record format, split, and optional subset
-   that training will read. Choose one of two routes:
+   that training will read. Choose one of three routes:
 
    - **Option A · Use a Downloaded Dataset** lists completed Hugging Face dataset snapshots and
      current transfers. Select the repository and match its column shape: OpenAI `messages`,
@@ -85,14 +85,20 @@ The first five navigation items form one guided workflow:
      reuses the downloaded cache. Dataset split slices such as `train[:10%]` and named subsets are
      supported. If a transfer left only a partial cache entry, the page labels it **INCOMPLETE**,
      explains that its snapshot cannot be used for training, and directs you to download it again.
-   - **Option B · Build My Own Dataset** lets you enter a user prompt and exact ideal answer in a
-     normal form; **Add & Save Local Example** generates chat JSONL automatically. The first form
-     entry replaces the untouched `EDIT ME` starter template and later entries append safely. A
-     collapsible raw editor remains available for bulk work. Saving Option B makes that local JSONL
-     the active source.
+   - **Option B · Load JSON / JSONL File** opens a file chooser rather than asking for a dataset
+     path. The loader checks UTF-8 and JSON/JSONL syntax, validates every record, detects OpenAI
+     `messages`, ShareGPT `conversations`, Alpaca rows, common prompt/response pairs, or a complete
+     `text` field, and shows a bounded preview before anything is written. Chat-shaped inputs are
+     normalized to OpenAI messages. Accepting the preview saves a project-local JSONL copy and
+     updates the active YAML without modifying the original file. Browser imports are limited to
+     64MB; use HF Hub for larger datasets.
+   - **Option C · Build Examples In The Studio** lets you enter a user prompt and exact ideal
+     answer in a normal form; **Add & Save Local Example** generates chat JSONL automatically. The
+     first form entry replaces the untouched `EDIT ME` starter template and later entries append
+     safely. A collapsible advanced editor remains available for deliberate bulk JSONL work.
 
    An overwritten local dataset keeps its immediately previous version as `filename.jsonl.bak`.
-   Guided JSONL files are gitignored by default because personality data can contain private
+   Project-local JSONL files are gitignored by default because training data can contain private
    material.
 4. **3 · Train** blocks its beginner start button until the configured data passes the Studio
    checks and Axolotl preflight. **Start Training** reruns those checks automatically; standalone

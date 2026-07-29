@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import unittest
+from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import lcars_ui as lcars
@@ -161,6 +164,18 @@ class V44UiTests(unittest.TestCase):
             self.widgets["lora-data-current-help"].content.lower(),
         )
         self.assertIn(
+            "/lora/data/import",
+            self.widgets["lora-data-file-loader"].content,
+        )
+        self.assertEqual(
+            len(self.widgets["lora-data-file-formats-table"].rows),
+            4,
+        )
+        self.assertIn(
+            "nothing is written",
+            self.widgets["lora-data-file-loader-note"].content.lower(),
+        )
+        self.assertIn(
             "TRAINING WILL READ",
             self.widgets["lora-data-active-source"].content,
         )
@@ -252,6 +267,143 @@ class V44UiTests(unittest.TestCase):
             )
         )
 
+    def test_raw_dataset_editor_does_not_read_outside_the_project(self) -> None:
+        with TemporaryDirectory() as project_dir, TemporaryDirectory() as outside_dir:
+            project_root = Path(project_dir)
+            local = project_root / "data" / "local.jsonl"
+            local.parent.mkdir()
+            local.write_text('{"text": "project data"}\n', encoding="utf-8")
+            outside = Path(outside_dir) / "outside.jsonl"
+            outside.write_text('{"text": "private data"}\n', encoding="utf-8")
+
+            with patch.object(main, "PROJECT_ROOT", project_root):
+                local_defaults = main._lora_editor_defaults(
+                    {"datasets": [{"path": "./data/local.jsonl"}]},
+                    "fallback.jsonl",
+                    "fallback",
+                )
+                outside_defaults = main._lora_editor_defaults(
+                    {"datasets": [{"path": str(outside)}]},
+                    "fallback.jsonl",
+                    "fallback",
+                )
+
+        self.assertEqual(local_defaults, ("local.jsonl", '{"text": "project data"}\n'))
+        self.assertEqual(outside_defaults, ("outside.jsonl", ""))
+
+    def test_accepted_import_synchronizes_rebuilt_and_durable_editor_state(self) -> None:
+        build_state = get_session_state("build")
+        original = dict(build_state)
+        try:
+            with (
+                patch.object(
+                    main.UI_STATE,
+                    "remember_widgets",
+                    return_value=True,
+                ) as remember,
+                patch.object(main.UI_STATE, "save") as save,
+            ):
+                main._remember_lora_dataset_editor(
+                    "checked.jsonl",
+                    '{"text": "checked"}',
+                )
+
+            self.assertEqual(build_state["lora-data-filename"], "checked.jsonl")
+            self.assertEqual(build_state["lora-data-editor"], '{"text": "checked"}\n')
+            remember.assert_called_once_with(
+                {"lora-data-filename": "checked.jsonl"},
+                keys={"lora-data-filename"},
+            )
+            save.assert_called_once()
+        finally:
+            build_state.clear()
+            build_state.update(original)
+
+    def test_json_dataset_route_previews_normalizes_and_applies_once(self) -> None:
+        app = main.FastAPI()
+        main._install_lora_dataset_loader(app)
+        routes = {
+            getattr(route, "path", ""): route.endpoint
+            for route in app.router.routes
+            if hasattr(route, "endpoint")
+        }
+        upload = main.UploadFile(
+            filename="captain data.json",
+            file=BytesIO(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "conversations": [
+                                    {"from": "human", "value": "Status?"},
+                                    {
+                                        "from": "gpt",
+                                        "value": "All systems ready. <script>alert('x')</script>",
+                                    },
+                                ]
+                            }
+                        ]
+                    }
+                ).encode()
+            ),
+        )
+
+        preview = asyncio.run(
+            routes["/lora/data/import/preview"](dataset_file=upload)
+        )
+        self.assertIn("ShareGPT conversations", preview)
+        self.assertIn("All systems ready.", preview)
+        self.assertNotIn("<script>alert", preview)
+        self.assertIn("&lt;script&gt;", preview)
+        token_match = re.search(
+            r"name='token' type='hidden' value='([^']+)'",
+            preview,
+        )
+        self.assertIsNotNone(token_match)
+        token = token_match.group(1)
+
+        with (
+            TemporaryDirectory() as temp_dir,
+            patch.object(main, "PROJECT_ROOT", Path(temp_dir)),
+            patch.object(
+                main.STATE.config_store,
+                "load",
+                return_value={"base_model": "Qwen/Qwen3.5-4B"},
+            ),
+            patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
+            patch.object(main.STATE, "refresh_preflight", return_value=[]),
+            patch.object(main.STATE.workflow, "status", "idle"),
+            patch.object(main, "_remember_lora_dataset_editor") as remember_editor,
+        ):
+            applied = routes["/lora/data/import/apply"](
+                token=token,
+                filename="captain-data.jsonl",
+            )
+            saved = Path(temp_dir) / "data" / "captain-data.jsonl"
+            saved_record = json.loads(saved.read_text(encoding="utf-8"))
+
+        self.assertIn("DATASET LOADED", applied)
+        self.assertEqual(
+            saved_record["messages"],
+            [
+                {"role": "user", "content": "Status?"},
+                {
+                    "role": "assistant",
+                    "content": "All systems ready. <script>alert('x')</script>",
+                },
+            ],
+        )
+        updates = apply_updates.call_args.args[0]
+        self.assertEqual(updates["datasets.0.path"], "./data/captain-data.jsonl")
+        self.assertEqual(updates["datasets.0.type"], "chat_template")
+        self.assertIsNone(updates["datasets.0.chat_template"])
+        remember_editor.assert_called_once()
+        repeated = routes["/lora/data/import/apply"](
+            token=token,
+            filename="captain-data.jsonl",
+        )
+        self.assertIn("expired or was already used", repeated)
+
     def test_saving_data_preserves_known_models_top_level_chat_template(self) -> None:
         report = main.DatasetReport(
             source="./data/qwen-project.jsonl",
@@ -267,12 +419,13 @@ class V44UiTests(unittest.TestCase):
             ),
             patch.object(
                 main,
-                "save_chat_jsonl",
+                "save_jsonl_dataset",
                 return_value=(Path("/project/data/qwen-project.jsonl"), report),
             ),
             patch.object(main, "_workflow_blocks_config_change", return_value=False),
             patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
             patch.object(main.STATE, "refresh_preflight", return_value=[]),
+            patch.object(main, "_remember_lora_dataset_editor"),
             patch.object(main, "_set_session_value"),
             patch.object(main, "_update_config_widgets"),
             patch.object(main, "_update_preflight_widgets"),
@@ -281,12 +434,59 @@ class V44UiTests(unittest.TestCase):
         ):
             saved = main._lora_save_dataset_action(
                 "qwen-project.jsonl",
-                '{"messages": []}',
+                json.dumps(
+                    {
+                        "messages": [
+                            {"role": "user", "content": "Status?"},
+                            {"role": "assistant", "content": "Ready."},
+                        ]
+                    }
+                ),
             )
 
         self.assertTrue(saved)
         updates = apply_updates.call_args.args[0]
         self.assertIsNone(updates["datasets.0.chat_template"])
+
+    def test_raw_editor_uses_the_import_parser_for_completion_data(self) -> None:
+        report = main.DatasetReport(
+            source="./data/completion.jsonl",
+            source_kind="local",
+            dataset_type="completion",
+            example_count=1,
+        )
+        with (
+            patch.object(
+                main,
+                "_load_config_or_empty",
+                return_value={"base_model": "Qwen/Qwen3.5-4B"},
+            ),
+            patch.object(
+                main,
+                "save_jsonl_dataset",
+                return_value=(Path("/project/data/completion.jsonl"), report),
+            ) as save_dataset,
+            patch.object(main, "_workflow_blocks_config_change", return_value=False),
+            patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
+            patch.object(main.STATE, "refresh_preflight", return_value=[]),
+            patch.object(main, "_remember_lora_dataset_editor"),
+            patch.object(main, "_set_session_value"),
+            patch.object(main, "_update_config_widgets"),
+            patch.object(main, "_update_preflight_widgets"),
+            patch.object(main, "_update_lora_widgets"),
+            patch.object(main.lcars, "notify"),
+        ):
+            saved = main._lora_save_dataset_action(
+                "completion.jsonl",
+                '{"text": "A complete training document."}',
+            )
+
+        self.assertTrue(saved)
+        self.assertEqual(save_dataset.call_args.kwargs["dataset_type"], "completion")
+        updates = apply_updates.call_args.args[0]
+        self.assertEqual(updates["datasets.0.type"], "completion")
+        self.assertEqual(updates["datasets.0.field"], "text")
+        self.assertIsNone(updates["datasets.0.field_messages"])
 
     def test_downloaded_dataset_action_applies_cache_repo_and_shape_atomically(self) -> None:
         cached = [

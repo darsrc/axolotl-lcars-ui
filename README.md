@@ -78,12 +78,13 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   translates plain choices into a normal Axolotl YAML config. Architecture-aware templates cover
   Qwen 3.5 2B/4B/9B, Qwen 3.6 27B/35B-A3B, and Gemma 4 E2B/E4B with the correct chat format,
   text-backbone targets, and safe first recipe. Every beginner option explains its effect, and a
-  current-value tuning guide says what to change, when, and why. The Data page offers two explicit
-  routes: select a completed Hugging Face dataset download and its common row shape, or create a
-  local chat dataset with a plain conversation form. The latter saves JSONL without requiring users
-  to write JSON; the collapsible raw editor validates bulk edits, calls out unfinished placeholders,
-  and keeps a backup when a draft is overwritten. Interrupted Hugging Face dataset downloads remain
-  visible as incomplete, with a direct retry instruction, but cannot be selected for training.
+  current-value tuning guide says what to change, when, and why. The Data page offers three explicit
+  routes: select a completed Hugging Face dataset download and its common row shape; load, check,
+  normalize, and preview an existing JSON/JSONL file; or create a local chat dataset with a plain
+  conversation form. The latter saves JSONL without requiring users to write JSON; the collapsible
+  raw editor validates deliberate bulk edits, calls out unfinished placeholders, and keeps a backup
+  when a draft is overwritten. Interrupted Hugging Face dataset downloads remain visible as
+  incomplete, with a direct retry instruction, but cannot be selected for training.
 - Focused LoRA training gate and monitor with plain-language settings, preflight/data readiness,
   live process/GPU/RAM state, Axolotl logs, a one-click preflight-gated start, optional standalone
   preprocessing, safe stop controls, and automatic Safetensors adapter discovery.

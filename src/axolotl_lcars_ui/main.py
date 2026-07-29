@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import html
 import math
+import secrets
 import threading
 import time
 import webbrowser
@@ -15,7 +16,7 @@ from typing import Any, Callable, Literal
 
 import lcars_ui as lcars
 import uvicorn
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.datastructures import State
 
@@ -36,6 +37,7 @@ from axolotl_lcars_ui.lora_studio import (
     LORA_PRESETS,
     LORA_PRESET_KEYS,
     LORA_TUNING_HINTS,
+    DatasetImport,
     DatasetReport,
     LoraStudioError,
     beginner_config_updates,
@@ -48,10 +50,12 @@ from axolotl_lcars_ui.lora_studio import (
     infer_lora_preset,
     inspect_configured_dataset,
     inspect_jsonl_text,
+    local_dataset_config_updates,
     lora_tuning_hint,
     normalize_project_name,
+    parse_json_dataset,
     recommend_lora_preset,
-    save_chat_jsonl,
+    save_jsonl_dataset,
     starter_dataset_template,
     suggested_ollama_model,
 )
@@ -88,6 +92,9 @@ HF_RESULTS_PAGE_KEY = "hf-results-page"
 HF_RESULTS_PAGE_SIZE_KEY = "hf-results-page-size"
 HF_RESULTS_PAGE_SIZE = 10
 HF_RESULTS_PAGE_SIZES = (10, 25, 50, 100)
+LORA_DATASET_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+LORA_DATASET_IMPORT_TTL_SECONDS = 15 * 60
+LORA_DATASET_IMPORT_MAX_PENDING = 3
 SEARCH_INPUT_OPTIONS = lcars.TextInputOptions(
     input_type="search",
     commit="enter",
@@ -442,6 +449,12 @@ SETUP_RECIPES: dict[str, dict[str, Any]] = {
         "sample_packing": True,
     },
 }
+
+
+@dataclass(frozen=True)
+class _PendingDatasetImport:
+    dataset: DatasetImport
+    created_at: float
 
 
 @dataclass
@@ -1214,11 +1227,17 @@ def _lora_data_page() -> None:
     )
     goal = _widget_value("lora-goal", LORA_GOALS[0])
     filename_default = f"{project_name}.jsonl"
-    _seed_text("lora-data-filename", filename_default)
-    _seed_text(
-        "lora-data-editor",
-        starter_dataset_template(goal, project_name.replace("-", " ").title()),
+    editor_default = starter_dataset_template(
+        goal,
+        project_name.replace("-", " ").title(),
     )
+    filename_default, editor_default = _lora_editor_defaults(
+        cfg,
+        filename_default,
+        editor_default,
+    )
+    _seed_text("lora-data-filename", filename_default)
+    _seed_text("lora-data-editor", editor_default)
 
     with lcars.page("LoRA Data", id="lora-data", layout="grid", fillers=False):
         with lcars.data_panel(
@@ -1233,9 +1252,9 @@ def _lora_data_page() -> None:
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
-                "**This is the one dataset the Train page will use.** Choose either the downloaded "
-                "dataset route or the local example builder below; selecting one replaces the "
-                "other as the active source.",
+                "**This is the one dataset the Train page will use.** Choose a downloaded Hub "
+                "dataset, load an existing JSON/JSONL file, or build examples in the Studio. "
+                "Selecting one replaces the other as the active source.",
                 id="lora-data-current-help",
             )
             lcars.text(
@@ -1405,7 +1424,62 @@ def _lora_data_page() -> None:
             )
 
         with lcars.control_panel(
-            "Option B · Build My Own Dataset",
+            "Option B · Load JSON / JSONL File",
+            color="lilac",
+            id="lora-dataset-loader-panel",
+            zone="full",
+            span=(4, 5),
+            weight=12,
+            aspect="wide",
+            group="lora-data-loader",
+            options=DENSE_PANEL_OPTIONS,
+        ):
+            lcars.markdown(
+                "Choose an existing `.json` or `.jsonl` file instead of typing dataset paths or "
+                "pasting raw records. The loader checks UTF-8 and JSON syntax, detects common "
+                "record shapes, validates every example, normalizes chat data to OpenAI messages, "
+                "and shows a preview **before** changing the active project.\n\n"
+                "### [Choose and inspect a dataset file →](/lora/data/import)",
+                id="lora-data-file-loader",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
+            _enhanced_table(
+                [
+                    {
+                        "Input shape": "OpenAI chat",
+                        "Recognized columns": "messages → role/content",
+                        "Loaded as": "chat_template",
+                    },
+                    {
+                        "Input shape": "ShareGPT",
+                        "Recognized columns": "conversations → from/value",
+                        "Loaded as": "normalized OpenAI chat",
+                    },
+                    {
+                        "Input shape": "Instruction / pairs",
+                        "Recognized columns": (
+                            "instruction/output, prompt/response, question/answer, input/output"
+                        ),
+                        "Loaded as": "normalized OpenAI chat",
+                    },
+                    {
+                        "Input shape": "Completion text",
+                        "Recognized columns": "text",
+                        "Loaded as": "completion",
+                    },
+                ],
+                title="Automatically Detected Formats",
+                id="lora-data-file-formats-table",
+                filter_columns={"Input shape", "Recognized columns", "Loaded as"},
+            )
+            lcars.text(
+                "Files are limited to 64MB in the browser loader. Use HF Hub for larger datasets. "
+                "Nothing is written until the checked preview is explicitly accepted.",
+                id="lora-data-file-loader-note",
+            )
+
+        with lcars.control_panel(
+            "Option C · Build Examples In The Studio",
             color="tanoi",
             id="lora-example-builder-panel",
             zone="full",
@@ -1492,7 +1566,7 @@ def _lora_data_page() -> None:
             )
 
         with lcars.control_panel(
-            "Option B Advanced · Raw JSONL",
+            "Option C Advanced · Raw JSONL",
             color="golden-tanoi",
             id="lora-data-editor-panel",
             zone="full",
@@ -1504,8 +1578,9 @@ def _lora_data_page() -> None:
         ):
             lcars.markdown(
                 "Use this only when you want to bulk-edit or paste JSONL. Each line is one "
-                "conversation. Replace every **EDIT ME** answer with the exact response the model "
-                "should imitate.",
+                "record. The same checker accepts OpenAI chat, ShareGPT, Alpaca, prompt/response, "
+                "and completion-text shapes, then normalizes them before saving. Replace every "
+                "**EDIT ME** answer with the exact response the model should imitate.",
                 id="lora-data-editor-help",
             )
             with lcars.form(
@@ -1530,7 +1605,7 @@ def _lora_data_page() -> None:
                     ),
                 )
                 editor_text = lcars.text_input(
-                    "One JSON Conversation Per Line",
+                    "One JSON Record Per Line",
                     value="",
                     placeholder='{"messages": [{"role": "user", "content": "..."}, ...]}',
                     autocomplete=False,
@@ -4515,6 +4590,47 @@ def _lora_data_source_label(
     return "HF REPOSITORY"
 
 
+def _lora_editor_defaults(
+    cfg: dict[str, Any],
+    fallback_filename: str,
+    fallback_text: str,
+) -> tuple[str, str]:
+    """Seed the optional raw editor from a small configured local JSONL file."""
+
+    source = str(_config_path_value(cfg, "datasets.0.path") or "").strip()
+    if not source or not source.lower().endswith(".jsonl"):
+        return fallback_filename, fallback_text
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        resolved = path.resolve()
+        project_root = PROJECT_ROOT.resolve()
+        if (
+            not resolved.is_relative_to(project_root)
+            or not resolved.is_file()
+            or resolved.stat().st_size > 2 * 1024 * 1024
+        ):
+            return Path(source).name or fallback_filename, ""
+        return resolved.name, resolved.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return Path(source).name or fallback_filename, ""
+
+
+def _remember_lora_dataset_editor(filename: str, text: str) -> None:
+    """Keep the rebuilt manifest and durable filename aligned with an accepted import."""
+
+    normalized_text = text.rstrip() + "\n"
+    build_state = get_session_state("build")
+    build_state["lora-data-filename"] = filename
+    build_state["lora-data-editor"] = normalized_text
+    if UI_STATE.remember_widgets(
+        {"lora-data-filename": filename},
+        keys={"lora-data-filename"},
+    ):
+        UI_STATE.save()
+
+
 def _lora_active_dataset_summary(
     cfg: dict[str, Any],
     report: DatasetReport,
@@ -5684,30 +5800,41 @@ def _lora_save_dataset_action(
     if _workflow_blocks_config_change():
         return False
     try:
+        cfg = _load_config_or_empty()
         model_template = get_lora_model_template(
-            str(_load_config_or_empty().get("base_model") or "")
+            str(cfg.get("base_model") or "")
         )
-        target, draft_report = save_chat_jsonl(
+        imported = parse_json_dataset(
+            filename.strip(),
+            editor_text.encode("utf-8"),
+        )
+        dataset_type = (
+            "completion"
+            if imported.format_key == "plain-text"
+            else "chat_template"
+        )
+        target, draft_report = save_jsonl_dataset(
             PROJECT_ROOT,
             filename.strip(),
-            editor_text,
+            imported.jsonl_text,
+            dataset_type=dataset_type,
         )
         STATE.config_store.apply_updates(
-            {
-                "datasets.0.path": f"./data/{target.name}",
-                "datasets.0.type": "chat_template",
-                "datasets.0.ds_type": "json",
-                "datasets.0.field_messages": "messages",
+            local_dataset_config_updates(
+                target.name,
+                imported.format_key,
                 # Known model templates own message formatting at the top level.
-                "datasets.0.chat_template": (
-                    None if model_template is not None else "tokenizer_default"
-                ),
-                "datasets.0.roles_to_train": "assistant",
-                "datasets.0.train_on_eos": "turn",
-            }
+                use_top_level_chat_template=model_template is not None,
+            )
         )
+        _remember_lora_dataset_editor(target.name, imported.jsonl_text)
+    except Exception as exc:
+        lcars.notify(f"Dataset was not saved: {exc}", level="error")
+        return False
+
+    try:
         _set_session_value("lora-data-filename", target.name)
-        _set_session_value("lora-data-editor", editor_text)
+        _set_session_value("lora-data-editor", imported.jsonl_text.rstrip() + "\n")
         _update_config_widgets()
         issues = STATE.refresh_preflight()
         _update_preflight_widgets(issues)
@@ -5723,8 +5850,13 @@ def _lora_save_dataset_action(
             )
         return True
     except Exception as exc:
-        lcars.notify(f"Dataset was not saved: {exc}", level="error")
-        return False
+        if notify:
+            lcars.notify(
+                "Dataset saved and configured, but the status panels could not refresh: "
+                f"{exc}",
+                level="error",
+            )
+        return True
 
 
 def _lora_add_example_action(
@@ -6880,6 +7012,7 @@ def create_lcars_app(
 
         app.state._live_coro_factory = _live_loop
 
+    _install_lora_dataset_loader(app)
     _install_raw_editor(app)
     return app
 
@@ -6972,6 +7105,288 @@ def _mark_manifest_stale(app: FastAPI) -> None:
     """Flag the manifest for rebuild before the next client reads it."""
 
     app.state._manifest_stale = True
+
+
+def _install_lora_dataset_loader(app: FastAPI) -> None:
+    """Install the scoped JSON/JSONL inspect-preview-apply workflow."""
+
+    pending: dict[str, _PendingDatasetImport] = {}
+    pending_lock = threading.Lock()
+
+    def purge_expired() -> None:
+        cutoff = time.time() - LORA_DATASET_IMPORT_TTL_SECONDS
+        expired = [
+            token
+            for token, item in pending.items()
+            if item.created_at < cutoff
+        ]
+        for token in expired:
+            pending.pop(token, None)
+        while len(pending) >= LORA_DATASET_IMPORT_MAX_PENDING:
+            oldest = min(pending, key=lambda token: pending[token].created_at)
+            pending.pop(oldest, None)
+
+    @app.get(
+        "/lora/data/import",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    def lora_dataset_import_get() -> str:
+        return _lora_dataset_import_html()
+
+    _move_last_route_before_spa(app)
+
+    @app.post(
+        "/lora/data/import/preview",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    async def lora_dataset_import_preview(
+        dataset_file: UploadFile = File(...),
+    ) -> str:
+        filename = dataset_file.filename or ""
+        try:
+            content = await dataset_file.read(LORA_DATASET_UPLOAD_MAX_BYTES + 1)
+        finally:
+            await dataset_file.close()
+        if len(content) > LORA_DATASET_UPLOAD_MAX_BYTES:
+            return _lora_dataset_import_html(
+                error=(
+                    "The selected file is larger than 64MB. Use HF Hub for large datasets "
+                    "so they can be cached and streamed safely."
+                )
+            )
+        try:
+            dataset = parse_json_dataset(filename, content)
+        except Exception as exc:
+            return _lora_dataset_import_html(error=str(exc))
+
+        token = secrets.token_urlsafe(24)
+        with pending_lock:
+            purge_expired()
+            pending[token] = _PendingDatasetImport(
+                dataset=dataset,
+                created_at=time.time(),
+            )
+        return _lora_dataset_import_html(dataset=dataset, token=token)
+
+    _move_last_route_before_spa(app)
+
+    @app.post(
+        "/lora/data/import/apply",
+        response_class=HTMLResponse,
+        include_in_schema=False,
+    )
+    def lora_dataset_import_apply(
+        token: str = Form(...),
+        filename: str = Form(...),
+    ) -> str:
+        with pending_lock:
+            purge_expired()
+            # Claim the preview while applying it so a double-submit cannot write
+            # the same normalized dataset twice or replace its backup unexpectedly.
+            item = pending.pop(token, None)
+        if item is None:
+            return _lora_dataset_import_html(
+                error=(
+                    "That checked preview expired or was already used. "
+                    "Choose the dataset file again."
+                )
+            )
+        dataset = item.dataset
+        if STATE.workflow.is_active:
+            with pending_lock:
+                purge_expired()
+                pending[token] = item
+            return _lora_dataset_import_html(
+                dataset=dataset,
+                token=token,
+                error=(
+                    "The active config is locked while its workflow is running. "
+                    "Stop the workflow before changing its dataset."
+                ),
+            )
+        try:
+            dataset_type = (
+                "completion"
+                if dataset.format_key == "plain-text"
+                else "chat_template"
+            )
+            cfg = STATE.config_store.load()
+            model_template = get_lora_model_template(str(cfg.get("base_model") or ""))
+            config_updates = local_dataset_config_updates(
+                filename.strip(),
+                dataset.format_key,
+                use_top_level_chat_template=model_template is not None,
+            )
+            target, saved_report = save_jsonl_dataset(
+                PROJECT_ROOT,
+                filename.strip(),
+                dataset.jsonl_text,
+                dataset_type=dataset_type,
+            )
+            STATE.config_store.apply_updates(config_updates)
+            _remember_lora_dataset_editor(target.name, dataset.jsonl_text)
+        except Exception as exc:
+            with pending_lock:
+                purge_expired()
+                pending[token] = item
+            return _lora_dataset_import_html(
+                dataset=dataset,
+                token=token,
+                error=f"Dataset was not applied: {exc}",
+            )
+        preflight_warning = ""
+        try:
+            STATE.refresh_preflight()
+        except Exception as exc:
+            preflight_warning = (
+                f" The dataset is active, but the preflight display could not refresh: {exc}."
+            )
+        _mark_manifest_stale(app)
+        return _lora_dataset_import_html(
+            success=(
+                f"Loaded {saved_report.example_count or 0} validated example(s) as "
+                f"./data/{target.name}. The active LoRA config now uses this dataset."
+                f"{preflight_warning}"
+            )
+        )
+
+    _move_last_route_before_spa(app)
+
+
+def _lora_dataset_import_html(
+    *,
+    dataset: DatasetImport | None = None,
+    token: str = "",
+    error: str = "",
+    success: str = "",
+) -> str:
+    error_html = (
+        f"<section class='notice error'><h2>NOT LOADED</h2><p>{html.escape(error)}</p></section>"
+        if error
+        else ""
+    )
+    success_html = (
+        "<section class='notice success'><h2>DATASET LOADED</h2>"
+        f"<p>{html.escape(success)}</p>"
+        "<p><a class='action secondary' href='/?page=lora-data'>Return to LoRA Data</a></p>"
+        "</section>"
+        if success
+        else ""
+    )
+    preview_html = _lora_dataset_import_preview_html(dataset, token) if dataset else ""
+    upload_hidden = " hidden" if success else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LoRA Dataset Loader</title>
+  <style>
+    :root {{ color-scheme:dark; --bg:#05070d; --panel:#111827; --line:#c9a7ff; --gold:#ffbd66; --blue:#78c7ff; --ok:#7dffb2; --bad:#ff7e8b; --text:#f7f1da; --muted:#a9b5c8; }}
+    * {{ box-sizing:border-box; }}
+    body {{ margin:0; background:var(--bg); color:var(--text); font:15px/1.48 system-ui, sans-serif; }}
+    header {{ display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 22px; border-bottom:5px solid var(--line); }}
+    h1,h2 {{ margin:0; color:var(--line); letter-spacing:.03em; }}
+    h1 {{ font-size:clamp(22px,4vw,34px); }}
+    h2 {{ font-size:18px; margin-bottom:10px; }}
+    a {{ color:var(--blue); }}
+    main {{ width:min(1180px,100%); margin:auto; padding:20px; display:grid; gap:18px; }}
+    section {{ background:var(--panel); border-left:8px solid var(--line); border-radius:5px; padding:18px; }}
+    .lede {{ color:var(--muted); max-width:78ch; }}
+    .notice.error {{ border-color:var(--bad); }}
+    .notice.error h2 {{ color:var(--bad); }}
+    .notice.success {{ border-color:var(--ok); }}
+    .notice.success h2 {{ color:var(--ok); }}
+    form {{ display:grid; gap:14px; }}
+    label {{ color:var(--gold); font-weight:800; }}
+    input[type=file],input[type=text] {{ width:100%; border:2px solid #57657a; border-radius:4px; background:#050911; color:var(--text); padding:12px; }}
+    .action,button {{ display:inline-block; width:max-content; border:0; border-radius:4px; background:var(--line); color:#120820; padding:11px 17px; font-weight:900; text-decoration:none; cursor:pointer; }}
+    .secondary {{ background:var(--blue); color:#03111c; }}
+    .facts {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin:14px 0; }}
+    .fact {{ background:#080d17; border:1px solid #354158; border-radius:4px; padding:11px; }}
+    .fact strong {{ display:block; color:var(--gold); }}
+    table {{ width:100%; border-collapse:collapse; font-size:14px; }}
+    th,td {{ text-align:left; vertical-align:top; padding:9px; border-bottom:1px solid #354158; overflow-wrap:anywhere; }}
+    th {{ color:var(--gold); }}
+    ul {{ margin-bottom:0; }}
+    code {{ color:var(--blue); }}
+    .scroll {{ overflow:auto; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LoRA JSON / JSONL Loader</h1>
+    <a href="/?page=lora-data">Return to LoRA Data</a>
+  </header>
+  <main>
+    {error_html}
+    {success_html}
+    <section{upload_hidden}>
+      <h2>1 · Choose a dataset file</h2>
+      <p class="lede">The loader accepts UTF-8 JSON and JSONL up to 64MB. It detects OpenAI messages, ShareGPT conversations, Alpaca rows, common prompt/response pairs, and plain text. Invalid data is never written to the project.</p>
+      <form action="/lora/data/import/preview" method="post" enctype="multipart/form-data">
+        <label for="dataset_file">JSON or JSONL dataset</label>
+        <input id="dataset_file" name="dataset_file" type="file" accept=".json,.jsonl,application/json,application/x-ndjson" required>
+        <button type="submit">Inspect File</button>
+      </form>
+    </section>
+    {preview_html}
+  </main>
+</body>
+</html>"""
+
+
+def _lora_dataset_import_preview_html(
+    dataset: DatasetImport,
+    token: str,
+) -> str:
+    warnings = "".join(
+        f"<li>{html.escape(warning)}</li>"
+        for warning in dataset.report.warnings
+    )
+    warning_html = (
+        f"<h2>Checker advice</h2><ul>{warnings}</ul>"
+        if warnings
+        else "<h2>Checker result</h2><p>No structural warnings.</p>"
+    )
+    rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(str(row.get('Example') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('Input') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('Ideal output') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('Messages') or ''))}</td>"
+        "</tr>"
+        for row in dataset.preview_rows
+    )
+    return (
+        "<section>"
+        "<h2>2 · Checked preview</h2>"
+        "<div class='facts'>"
+        f"<div class='fact'><strong>Source</strong>{html.escape(dataset.source_name)}</div>"
+        f"<div class='fact'><strong>Detected</strong>{html.escape(dataset.detected_format)}</div>"
+        f"<div class='fact'><strong>Examples</strong>{dataset.report.example_count or 0}</div>"
+        f"<div class='fact'><strong>Messages</strong>{dataset.report.message_count}</div>"
+        "</div>"
+        f"{warning_html}"
+        "<div class='scroll'><table><thead><tr><th>#</th><th>Input</th>"
+        "<th>Ideal output</th><th>Messages</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+        "</section>"
+        "<section>"
+        "<h2>3 · Use the checked dataset</h2>"
+        "<p class='lede'>The normalized copy is saved inside <code>./data</code>; "
+        "the original upload is not modified. The active LoRA YAML is updated only now.</p>"
+        "<form action='/lora/data/import/apply' method='post'>"
+        f"<input name='token' type='hidden' value='{html.escape(token)}'>"
+        "<label for='filename'>Project dataset filename</label>"
+        f"<input id='filename' name='filename' type='text' value='{html.escape(dataset.suggested_filename)}' "
+        "pattern='[A-Za-z0-9][A-Za-z0-9._-]{0,126}\\.jsonl' required>"
+        "<button type='submit'>Use This Dataset</button>"
+        "</form>"
+        "</section>"
+    )
 
 
 def _install_raw_editor(app: FastAPI) -> None:

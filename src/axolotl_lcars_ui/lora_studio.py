@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -714,6 +716,19 @@ class DatasetReport:
 
 
 @dataclass(frozen=True)
+class DatasetImport:
+    """Validated local JSON/JSONL data normalized for Axolotl."""
+
+    source_name: str
+    suggested_filename: str
+    detected_format: str
+    format_key: str
+    jsonl_text: str
+    report: DatasetReport
+    preview_rows: tuple[Mapping[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class AdapterArtifact:
     """A PEFT adapter directory produced by Axolotl."""
 
@@ -846,6 +861,30 @@ def downloaded_dataset_config_updates(
         "datasets.0.path": normalized_repo,
         "datasets.0.split": normalized_split,
         "datasets.0.name": normalized_subset or None,
+    }
+    updates.update(selected_format.settings)
+    if selected_format.settings.get("datasets.0.type") == "chat_template":
+        updates["datasets.0.chat_template"] = (
+            None if use_top_level_chat_template else "tokenizer_default"
+        )
+    return updates
+
+
+def local_dataset_config_updates(
+    filename: str,
+    format_key: str,
+    *,
+    use_top_level_chat_template: bool = False,
+) -> dict[str, Any]:
+    """Translate a validated local JSONL file into a clean Axolotl source."""
+
+    clean_name = _validated_dataset_filename(filename)
+    selected_format = get_lora_dataset_format(format_key)
+    updates: dict[str, Any] = {
+        **{key: None for key in _HF_DATASET_FORMAT_RESET_KEYS},
+        "datasets.0.path": f"./data/{clean_name}",
+        "datasets.0.split": None,
+        "datasets.0.ds_type": "json",
     }
     updates.update(selected_format.settings)
     if selected_format.settings.get("datasets.0.type") == "chat_template":
@@ -1138,15 +1177,119 @@ def inspect_jsonl_text(
     )
 
 
-def save_chat_jsonl(project_root: Path, filename: str, text: str) -> tuple[Path, DatasetReport]:
-    """Validate and save a guided dataset, preserving one recoverable prior draft."""
+def parse_json_dataset(filename: str, content: bytes) -> DatasetImport:
+    """Parse, normalize, validate, and preview an uploaded JSON or JSONL dataset."""
 
-    clean_name = Path(filename.strip()).name
-    if clean_name != filename.strip() or not _DATASET_NAME_PATTERN.fullmatch(clean_name):
+    source_name = Path(filename.strip()).name
+    suffix = Path(source_name).suffix.lower()
+    if not source_name or suffix not in {".json", ".jsonl"}:
+        raise LoraStudioError("Choose a .json or .jsonl dataset file.")
+    if not content:
+        raise LoraStudioError("The selected dataset file is empty.")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
         raise LoraStudioError(
-            "Use a simple .jsonl filename containing letters, numbers, dots, dashes, or underscores."
+            f"The dataset must be UTF-8 text (invalid byte near position {exc.start})."
+        ) from exc
+
+    container_warning = ""
+    if suffix == ".jsonl":
+        records = _parse_uploaded_jsonl(text)
+    else:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise LoraStudioError(
+                f"Invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}."
+            ) from exc
+        records, container_name = _uploaded_json_records(payload)
+        if container_name:
+            container_warning = (
+                f"Loaded examples from the top-level '{container_name}' array."
+            )
+
+    if not records:
+        raise LoraStudioError("The dataset does not contain any examples.")
+    shapes = {
+        _uploaded_record_shape(record, index)
+        for index, record in enumerate(records, start=1)
+    }
+    if len(shapes) != 1:
+        labels = ", ".join(sorted(_uploaded_shape_label(shape) for shape in shapes))
+        raise LoraStudioError(
+            "The file mixes incompatible record shapes "
+            f"({labels}). Convert every example to one consistent shape."
         )
-    report = inspect_jsonl_text(text, source=f"./data/{clean_name}")
+    shape = next(iter(shapes))
+    normalized = [
+        _normalize_uploaded_record(record, shape, index)
+        for index, record in enumerate(records, start=1)
+    ]
+    format_key = "plain-text" if shape[0] == "plain-text" else "openai-messages"
+    dataset_type = "completion" if format_key == "plain-text" else "chat_template"
+    lines = [json.dumps(record, ensure_ascii=False) for record in normalized]
+    jsonl_text = "\n".join(lines)
+    report = _inspect_records(
+        normalized,
+        source=source_name,
+        dataset_type=dataset_type,
+        messages_field="messages",
+        completion_field="text",
+    )
+    warnings = list(report.warnings)
+    if container_warning:
+        warnings.append(container_warning)
+    if shape[0] not in {"openai-messages", "plain-text"}:
+        warnings.append(
+            f"Detected {_uploaded_shape_label(shape)} and normalized it to OpenAI messages."
+        )
+    duplicate_count = len(lines) - len(set(lines))
+    if duplicate_count:
+        warnings.append(
+            f"Found {duplicate_count} exact duplicate example(s); remove duplicates "
+            "before a long training run."
+        )
+    report = DatasetReport(
+        source=report.source,
+        source_kind=report.source_kind,
+        dataset_type=report.dataset_type,
+        example_count=report.example_count,
+        message_count=report.message_count,
+        placeholder_count=report.placeholder_count,
+        errors=report.errors,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+    return DatasetImport(
+        source_name=source_name,
+        suggested_filename=_suggested_jsonl_filename(source_name),
+        detected_format=_uploaded_shape_label(shape),
+        format_key=format_key,
+        jsonl_text=jsonl_text,
+        report=report,
+        preview_rows=_uploaded_preview_rows(normalized, format_key),
+    )
+
+
+def save_jsonl_dataset(
+    project_root: Path,
+    filename: str,
+    text: str,
+    *,
+    dataset_type: str = "chat_template",
+    messages_field: str = "messages",
+    completion_field: str = "text",
+) -> tuple[Path, DatasetReport]:
+    """Validate and save normalized JSONL while preserving a recoverable backup."""
+
+    clean_name = _validated_dataset_filename(filename)
+    report = inspect_jsonl_text(
+        text,
+        source=f"./data/{clean_name}",
+        dataset_type=dataset_type,
+        messages_field=messages_field,
+        completion_field=completion_field,
+    )
     if report.errors:
         raise LoraStudioError(report.errors[0])
     if not report.example_count:
@@ -1157,11 +1300,306 @@ def save_chat_jsonl(project_root: Path, filename: str, text: str) -> tuple[Path,
     target = (data_dir / clean_name).resolve()
     if target.parent != data_dir:
         raise LoraStudioError("The dataset must stay inside this project's data directory.")
-    if target.exists():
-        backup = target.with_suffix(target.suffix + ".bak")
-        shutil.copy2(target, backup)
-    target.write_text(text.rstrip() + "\n", encoding="utf-8")
+    handle, temp_name = tempfile.mkstemp(
+        dir=data_dir,
+        prefix=".lcars-dataset-",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text.rstrip() + "\n")
+        if target.exists():
+            backup = target.with_suffix(target.suffix + ".bak")
+            shutil.copy2(target, backup)
+        os.replace(temp_name, target)
+    except BaseException:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
     return target, report
+
+
+def save_chat_jsonl(project_root: Path, filename: str, text: str) -> tuple[Path, DatasetReport]:
+    """Validate and save a guided dataset, preserving one recoverable prior draft."""
+
+    return save_jsonl_dataset(project_root, filename, text)
+
+
+def _parse_uploaded_jsonl(text: str) -> list[Any]:
+    records: list[Any] = []
+    errors: list[str] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            errors.append(f"Line {line_number}, column {exc.colno}: {exc.msg}.")
+            if len(errors) >= 5:
+                errors.append("More JSONL syntax errors were omitted.")
+                break
+    if errors:
+        raise LoraStudioError(" ".join(errors))
+    return records
+
+
+def _uploaded_json_records(payload: Any) -> tuple[list[Any], str]:
+    if isinstance(payload, list):
+        return payload, ""
+    if not isinstance(payload, dict):
+        raise LoraStudioError(
+            "A JSON dataset must be an example object, a list of examples, or an object "
+            "containing a data/records/examples/train list."
+        )
+    for key in ("data", "records", "examples", "train"):
+        candidate = payload.get(key)
+        if isinstance(candidate, list):
+            return candidate, key
+    return [payload], ""
+
+
+def _uploaded_record_shape(record: Any, index: int) -> tuple[str, ...]:
+    if not isinstance(record, dict):
+        raise LoraStudioError(f"Example {index}: expected a JSON object.")
+    if "messages" in record:
+        return ("openai-messages",)
+    if "conversations" in record:
+        return ("sharegpt",)
+    if "instruction" in record and "output" in record:
+        return ("alpaca",)
+    for prompt_key, response_key in (
+        ("prompt", "response"),
+        ("question", "answer"),
+        ("input", "output"),
+    ):
+        if prompt_key in record and response_key in record:
+            return ("prompt-response", prompt_key, response_key)
+    if "text" in record:
+        return ("plain-text",)
+    keys = ", ".join(str(key) for key in list(record)[:8]) or "none"
+    raise LoraStudioError(
+        f"Example {index}: unsupported columns ({keys}). Expected messages, conversations, "
+        "instruction/output, prompt/response, question/answer, input/output, or text."
+    )
+
+
+def _uploaded_shape_label(shape: tuple[str, ...]) -> str:
+    labels = {
+        "openai-messages": "OpenAI messages",
+        "sharegpt": "ShareGPT conversations",
+        "alpaca": "Alpaca instruction/input/output",
+        "plain-text": "plain text",
+    }
+    if shape[0] == "prompt-response":
+        return f"{shape[1]}/{shape[2]} pairs"
+    return labels[shape[0]]
+
+
+def _normalize_uploaded_record(
+    record: Any,
+    shape: tuple[str, ...],
+    index: int,
+) -> dict[str, Any]:
+    assert isinstance(record, dict)
+    if shape[0] == "openai-messages":
+        return {
+            "messages": _normalize_uploaded_messages(
+                record.get("messages"),
+                index,
+                role_key="role",
+                content_key="content",
+            )
+        }
+    if shape[0] == "sharegpt":
+        return {
+            "messages": _normalize_uploaded_messages(
+                record.get("conversations"),
+                index,
+                role_key="from",
+                content_key="value",
+            )
+        }
+    if shape[0] == "alpaca":
+        instruction = _required_uploaded_text(
+            record.get("instruction"),
+            index,
+            "instruction",
+        )
+        output = _required_uploaded_text(record.get("output"), index, "output")
+        optional_input = record.get("input")
+        if optional_input is not None and not isinstance(optional_input, str):
+            raise LoraStudioError(f"Example {index}: 'input' must be text when present.")
+        user_content = instruction
+        if isinstance(optional_input, str) and optional_input.strip():
+            user_content = f"{instruction}\n\nInput:\n{optional_input.strip()}"
+        return {
+            "messages": _prompt_response_messages(
+                user_content,
+                output,
+                record.get("system"),
+                index,
+            )
+        }
+    if shape[0] == "prompt-response":
+        prompt = _required_uploaded_text(record.get(shape[1]), index, shape[1])
+        response = _required_uploaded_text(record.get(shape[2]), index, shape[2])
+        return {
+            "messages": _prompt_response_messages(
+                prompt,
+                response,
+                record.get("system"),
+                index,
+            )
+        }
+    text = _required_uploaded_text(record.get("text"), index, "text")
+    return {"text": text}
+
+
+def _normalize_uploaded_messages(
+    messages: Any,
+    example_index: int,
+    *,
+    role_key: str,
+    content_key: str,
+) -> list[dict[str, str]]:
+    if not isinstance(messages, list) or not messages:
+        raise LoraStudioError(
+            f"Example {example_index}: '{role_key}/{content_key}' messages must be "
+            "a non-empty list."
+        )
+    role_aliases = {
+        "human": "user",
+        "gpt": "assistant",
+        "bot": "assistant",
+        "model": "assistant",
+    }
+    allowed_roles = {"system", "user", "assistant", "tool"}
+    normalized: list[dict[str, str]] = []
+    for message_index, message in enumerate(messages, start=1):
+        if not isinstance(message, dict):
+            raise LoraStudioError(
+                f"Example {example_index}, message {message_index}: expected an object."
+            )
+        role = str(message.get(role_key) or "").strip().lower()
+        role = role_aliases.get(role, role)
+        if role not in allowed_roles:
+            raise LoraStudioError(
+                f"Example {example_index}, message {message_index}: unsupported role "
+                f"{role!r}; use system, user/human, assistant/gpt, or tool."
+            )
+        content = _required_uploaded_text(
+            message.get(content_key),
+            example_index,
+            f"message {message_index} {content_key}",
+        )
+        normalized.append({"role": role, "content": content})
+    roles = {message["role"] for message in normalized}
+    if "user" not in roles or "assistant" not in roles:
+        raise LoraStudioError(
+            f"Example {example_index}: each chat example needs at least one user and "
+            "one assistant message."
+        )
+    return normalized
+
+
+def _prompt_response_messages(
+    prompt: str,
+    response: str,
+    system: Any,
+    example_index: int,
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    if system is not None:
+        if not isinstance(system, str):
+            raise LoraStudioError(
+                f"Example {example_index}: optional 'system' must be text."
+            )
+        if system.strip():
+            messages.append({"role": "system", "content": system.strip()})
+    messages.extend(
+        (
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": response},
+        )
+    )
+    return messages
+
+
+def _required_uploaded_text(value: Any, example_index: int, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise LoraStudioError(
+            f"Example {example_index}: '{field}' must contain non-empty text."
+        )
+    return value.strip()
+
+
+def _suggested_jsonl_filename(source_name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source_name).stem).strip("._-")
+    if not stem or not stem[0].isalnum():
+        stem = f"dataset-{stem}" if stem else "imported-dataset"
+    return f"{stem[:118]}.jsonl"
+
+
+def _validated_dataset_filename(filename: str) -> str:
+    clean_name = Path(filename.strip()).name
+    if clean_name != filename.strip() or not _DATASET_NAME_PATTERN.fullmatch(clean_name):
+        raise LoraStudioError(
+            "Use a simple .jsonl filename containing letters, numbers, dots, "
+            "dashes, or underscores."
+        )
+    return clean_name
+
+
+def _uploaded_preview_rows(
+    records: list[dict[str, Any]],
+    format_key: str,
+    *,
+    limit: int = 8,
+) -> tuple[Mapping[str, str], ...]:
+    rows: list[Mapping[str, str]] = []
+    for index, record in enumerate(records[:limit], start=1):
+        if format_key == "plain-text":
+            rows.append(
+                {
+                    "Example": str(index),
+                    "Input": _compact_preview(str(record.get("text") or "")),
+                    "Ideal output": "Completion text",
+                    "Messages": "1 text",
+                }
+            )
+            continue
+        messages = record.get("messages")
+        assert isinstance(messages, list)
+        user = next(
+            (
+                str(message.get("content") or "")
+                for message in messages
+                if isinstance(message, dict) and message.get("role") == "user"
+            ),
+            "",
+        )
+        assistant = next(
+            (
+                str(message.get("content") or "")
+                for message in reversed(messages)
+                if isinstance(message, dict) and message.get("role") == "assistant"
+            ),
+            "",
+        )
+        rows.append(
+            {
+                "Example": str(index),
+                "Input": _compact_preview(user),
+                "Ideal output": _compact_preview(assistant),
+                "Messages": str(len(messages)),
+            }
+        )
+    return tuple(rows)
+
+
+def _compact_preview(value: str, *, limit: int = 180) -> str:
+    compact = " ".join(value.split())
+    return compact if len(compact) <= limit else f"{compact[: limit - 3]}..."
 
 
 def discover_adapter_artifacts(
@@ -1392,6 +1830,7 @@ def _safe_stat(path: Path) -> Any | None:
 __all__ = [
     "AdapterArtifact",
     "DEFAULT_LORA_PRESET",
+    "DatasetImport",
     "DatasetReport",
     "LORA_BASE_MODELS",
     "LORA_BASE_MODEL_HINTS",
@@ -1418,10 +1857,13 @@ __all__ = [
     "infer_lora_preset",
     "inspect_configured_dataset",
     "inspect_jsonl_text",
+    "local_dataset_config_updates",
     "lora_tuning_hint",
     "normalize_project_name",
+    "parse_json_dataset",
     "recommend_lora_preset",
     "save_chat_jsonl",
+    "save_jsonl_dataset",
     "starter_dataset_template",
     "suggested_ollama_model",
 ]

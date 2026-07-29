@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from axolotl_lcars_ui.lora_studio import (
     DEFAULT_LORA_PRESET,
@@ -22,9 +23,12 @@ from axolotl_lcars_ui.lora_studio import (
     infer_lora_preset,
     inspect_configured_dataset,
     inspect_jsonl_text,
+    local_dataset_config_updates,
+    parse_json_dataset,
     recommend_lora_preset,
     normalize_project_name,
     save_chat_jsonl,
+    save_jsonl_dataset,
     starter_dataset_template,
     suggested_ollama_model,
 )
@@ -42,6 +46,140 @@ def _chat_line(user: str = "Hello", assistant: str = "Hello there.") -> str:
 
 
 class LoraStudioTests(unittest.TestCase):
+    def test_json_loader_detects_and_previews_openai_messages(self) -> None:
+        payload = [
+            {
+                "messages": [
+                    {"role": "system", "content": "Be concise."},
+                    {"role": "user", "content": "Status?"},
+                    {"role": "assistant", "content": "Ready."},
+                ]
+            },
+            {
+                "messages": [
+                    {"role": "user", "content": "Next step?"},
+                    {"role": "assistant", "content": "Run the test."},
+                ]
+            },
+        ]
+
+        imported = parse_json_dataset(
+            "training data.json",
+            json.dumps(payload).encode(),
+        )
+
+        self.assertEqual(imported.detected_format, "OpenAI messages")
+        self.assertEqual(imported.format_key, "openai-messages")
+        self.assertEqual(imported.suggested_filename, "training-data.jsonl")
+        self.assertEqual(imported.report.example_count, 2)
+        self.assertEqual(imported.report.message_count, 5)
+        self.assertEqual(imported.preview_rows[0]["Input"], "Status?")
+        self.assertEqual(imported.preview_rows[0]["Ideal output"], "Ready.")
+        self.assertTrue(inspect_jsonl_text(imported.jsonl_text).ready)
+
+    def test_jsonl_loader_normalizes_sharegpt_and_prompt_response_rows(self) -> None:
+        sharegpt = (
+            json.dumps(
+                {
+                    "conversations": [
+                        {"from": "human", "value": "Hello"},
+                        {"from": "gpt", "value": "Hi there"},
+                    ]
+                }
+            )
+            + "\n"
+        )
+        imported = parse_json_dataset("sharegpt.jsonl", sharegpt.encode())
+        normalized = json.loads(imported.jsonl_text)
+
+        self.assertEqual(imported.detected_format, "ShareGPT conversations")
+        self.assertEqual(
+            [message["role"] for message in normalized["messages"]],
+            ["user", "assistant"],
+        )
+        self.assertIn("normalized it to OpenAI messages", " ".join(imported.report.warnings))
+
+        pairs = parse_json_dataset(
+            "pairs.json",
+            json.dumps(
+                {
+                    "records": [
+                        {
+                            "question": "Why validate?",
+                            "answer": "To catch malformed training data.",
+                        }
+                    ]
+                }
+            ).encode(),
+        )
+        pair = json.loads(pairs.jsonl_text)
+        self.assertEqual(pairs.detected_format, "question/answer pairs")
+        self.assertEqual(pair["messages"][0]["content"], "Why validate?")
+        self.assertIn("top-level 'records'", " ".join(pairs.report.warnings))
+
+    def test_json_loader_supports_completion_text_and_rejects_unsafe_shapes(self) -> None:
+        imported = parse_json_dataset(
+            "completion.json",
+            json.dumps([{"text": "A complete training document."}]).encode(),
+        )
+        self.assertEqual(imported.format_key, "plain-text")
+        self.assertEqual(imported.report.dataset_type, "completion")
+        self.assertEqual(
+            json.loads(imported.jsonl_text),
+            {"text": "A complete training document."},
+        )
+        self.assertTrue(imported.report.ready)
+
+        with self.assertRaisesRegex(LoraStudioError, "mixes incompatible"):
+            parse_json_dataset(
+                "mixed.json",
+                json.dumps(
+                    [
+                        {"text": "completion"},
+                        {"prompt": "chat", "response": "answer"},
+                    ]
+                ).encode(),
+            )
+        with self.assertRaisesRegex(LoraStudioError, "at least one user"):
+            parse_json_dataset(
+                "missing-user.jsonl",
+                json.dumps(
+                    {
+                        "messages": [
+                            {"role": "assistant", "content": "No prompt."},
+                        ]
+                    }
+                ).encode(),
+            )
+        with self.assertRaisesRegex(LoraStudioError, "Line 2"):
+            parse_json_dataset(
+                "broken.jsonl",
+                (_chat_line() + "\n{broken}").encode(),
+            )
+
+    def test_local_dataset_updates_clear_stale_hub_shape_and_save_completion(self) -> None:
+        updates = local_dataset_config_updates(
+            "checked.jsonl",
+            "openai-messages",
+            use_top_level_chat_template=True,
+        )
+        self.assertEqual(updates["datasets.0.path"], "./data/checked.jsonl")
+        self.assertEqual(updates["datasets.0.ds_type"], "json")
+        self.assertEqual(updates["datasets.0.field_messages"], "messages")
+        self.assertIsNone(updates["datasets.0.name"])
+        self.assertIsNone(updates["datasets.0.split"])
+        self.assertIsNone(updates["datasets.0.chat_template"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target, report = save_jsonl_dataset(
+                Path(temp_dir),
+                "completion.jsonl",
+                json.dumps({"text": "A complete training document."}),
+                dataset_type="completion",
+            )
+            self.assertTrue(target.is_file())
+            self.assertTrue(report.ready)
+
     def test_beginner_profiles_translate_to_typed_axolotl_updates(self) -> None:
         balanced = beginner_config_updates(
             "Helpful Captain",
@@ -277,6 +415,28 @@ class LoraStudioTests(unittest.TestCase):
 
             with self.assertRaises(LoraStudioError):
                 save_chat_jsonl(root, "../escape.jsonl", _chat_line())
+
+    def test_dataset_save_replaces_atomically_and_cleans_failed_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target, _ = save_chat_jsonl(root, "persona.jsonl", _chat_line())
+            original = target.read_text(encoding="utf-8")
+
+            with (
+                patch(
+                    "axolotl_lcars_ui.lora_studio.os.replace",
+                    side_effect=OSError("simulated replace failure"),
+                ),
+                self.assertRaisesRegex(OSError, "simulated replace failure"),
+            ):
+                save_chat_jsonl(
+                    root,
+                    "persona.jsonl",
+                    _chat_line("New prompt", "New answer"),
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertFalse(list((root / "data").glob(".lcars-dataset-*.tmp")))
 
     def test_configured_dataset_and_adapter_artifacts_are_discovered(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
