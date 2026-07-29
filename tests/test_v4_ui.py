@@ -858,7 +858,7 @@ class V44UiTests(unittest.TestCase):
             )
             with (
                 patch.object(main.STATE.hf, "search", return_value=[result]),
-                patch.object(main.STATE.hf, "hydrate_results", return_value=1),
+                patch.object(main.STATE.hf, "hydrate_search_results", return_value=1),
                 patch.object(main.STATE.hf, "sift_results", return_value=[result]) as sift,
                 patch.object(main, "_update_hf_widgets"),
                 patch.object(main, "_append_hf_logs"),
@@ -888,7 +888,7 @@ class V44UiTests(unittest.TestCase):
             clear_session_state(session_id)
             set_ctx(original_ctx)
 
-    def test_hf_search_hydrates_the_visible_page_before_local_filters(self) -> None:
+    def test_hf_search_hydrates_the_complete_snapshot_before_local_filters(self) -> None:
         original_ctx = get_ctx()
         original_vram = main.STATE.hf.vram_limit_gb
         session_id = "hf-visible-hydration"
@@ -905,8 +905,16 @@ class V44UiTests(unittest.TestCase):
             )
             with (
                 patch.object(main.STATE.hf, "search", return_value=[result]),
-                patch.object(main.STATE.hf, "hydrate_results", return_value=1) as hydrate,
-                patch.object(main.STATE.hf, "sift_results", return_value=[result]),
+                patch.object(
+                    main.STATE.hf,
+                    "hydrate_search_results",
+                    return_value=1,
+                ) as hydrate,
+                patch.object(
+                    main.STATE.hf,
+                    "sift_results",
+                    return_value=[result],
+                ) as sift,
                 patch.object(main, "_update_hf_widgets"),
                 patch.object(main, "_append_hf_logs"),
             ):
@@ -916,10 +924,8 @@ class V44UiTests(unittest.TestCase):
                     vram_limit=24,
                 )
 
-            hydrate.assert_called_once_with(
-                [result],
-                limit=25,
-            )
+            hydrate.assert_called_once_with()
+            self.assertTrue(sift.call_args.kwargs["compatible_only"])
             self.assertEqual(
                 get_session_state(session_id)[main.HF_RESULTS_PAGE_KEY],
                 "1",
@@ -954,7 +960,7 @@ class V44UiTests(unittest.TestCase):
             )
             with (
                 patch.object(main.STATE.hf, "search", return_value=[]) as search,
-                patch.object(main.STATE.hf, "hydrate_results", return_value=0),
+                patch.object(main.STATE.hf, "hydrate_search_results", return_value=0),
                 patch.object(main.STATE.hf, "sift_results", return_value=[]),
                 patch.object(main, "_persist_widget_state"),
             ):
@@ -1007,7 +1013,7 @@ class V44UiTests(unittest.TestCase):
             )
             with (
                 patch.object(main.STATE.hf, "search", return_value=[]) as search,
-                patch.object(main.STATE.hf, "hydrate_results", return_value=0),
+                patch.object(main.STATE.hf, "hydrate_search_results", return_value=0),
                 patch.object(main.STATE.hf, "sift_results", return_value=[]) as sift,
                 patch.object(main, "_persist_widget_state"),
             ):
@@ -1026,6 +1032,7 @@ class V44UiTests(unittest.TestCase):
                 text="safetensors",
                 sort=main.STATE.hf.local_sort,
                 descending=main._kept_sort_direction(main.STATE.hf.local_sort),
+                compatible_only=False,
                 artifact_filter="base/trainable models",
                 quant_filter="Transformers safetensors",
                 fit_filter="fits vram",
@@ -1344,7 +1351,7 @@ class V44UiTests(unittest.TestCase):
             main.STATE.hf.local_sort = original_sort
             main.STATE.hf.local_sort_desc = original_descending
 
-    def test_hf_table_page_event_hydrates_the_new_visible_slice(self) -> None:
+    def test_hf_table_page_event_streams_slice_without_rehydrating(self) -> None:
         original_ctx = get_ctx()
         original_results = main.STATE.hf.search_results
         original_expanded = list(main.STATE.hf.expanded_result_ids)
@@ -1379,7 +1386,7 @@ class V44UiTests(unittest.TestCase):
             ):
                 main._handle_hf_table_action()
 
-            hydrate.assert_called_once_with(results[25:50], limit=25)
+            hydrate.assert_not_called()
             update.assert_called_once_with()
             pagination = main._hf_result_table_options().pagination
             self.assertIsNotNone(pagination)
@@ -1439,7 +1446,7 @@ class V44UiTests(unittest.TestCase):
             ):
                 main._handle_hf_table_action()
 
-            hydrate.assert_called_once_with(results[25:30], limit=25)
+            hydrate.assert_not_called()
             update.assert_called_once_with()
             append_logs.assert_not_called()
         finally:

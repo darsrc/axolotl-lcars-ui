@@ -55,6 +55,8 @@ MODEL_SUPPORT_DOWNLOAD_ALLOW = tuple(
 DATASET_SUPPORT_DOWNLOAD_ALLOW = ("*.py", "*.md")
 
 LOCAL_SORT_KEYS = ("downloads", "likes", "updated", "repo", "size", "fit", "files")
+METADATA_SORT_KEYS = frozenset({"fit", "size", "files"})
+SEARCH_METADATA_WORKERS = 8
 
 
 @dataclass
@@ -208,6 +210,7 @@ class HuggingFaceManager:
         text: str = "",
         sort: str = "downloads",
         descending: bool | None = None,
+        compatible_only: bool = False,
         artifact_filter: str = "any",
         quant_filter: str = "any",
         fit_filter: str = "any",
@@ -235,6 +238,8 @@ class HuggingFaceManager:
                 ]
             ).lower()
             if text and text not in haystack:
+                continue
+            if compatible_only and result.blocked:
                 continue
             if not _artifact_matches(result, artifact_filter):
                 continue
@@ -362,7 +367,7 @@ class HuggingFaceManager:
         limit: int = 10,
         max_workers: int = 4,
     ) -> int:
-        """Populate exact file metadata for a bounded set of visible results."""
+        """Populate exact file metadata for a bounded result set."""
 
         candidates: list[SearchResult] = []
         with self._lock:
@@ -393,10 +398,37 @@ class HuggingFaceManager:
                 hydrated = list(executor.map(hydrate, candidates))
         successful = sum(details is not None for details in hydrated)
         self.log(
-            f"Hydrated metadata for {successful}/{len(candidates)} visible "
+            f"Hydrated metadata for {successful}/{len(candidates)} "
             "Hugging Face result(s)."
         )
         return len(candidates)
+
+    def hydrate_search_results(
+        self,
+        *,
+        max_workers: int = SEARCH_METADATA_WORKERS,
+    ) -> int:
+        """Hydrate one complete active search snapshot before local operations."""
+
+        with self._lock:
+            results = list(self.all_search_results)
+            for result in results:
+                key = (result.repo_type, result.repo_id)
+                if key not in self.repo_details:
+                    # A new search is an intentional retry boundary for transient
+                    # Hub failures. Cached successful manifests remain reusable.
+                    self.inspection_errors.pop(key, None)
+        if not results:
+            return 0
+        self.log(
+            f"Loading exact metadata for the complete {len(results)}-result "
+            "Hugging Face snapshot."
+        )
+        return self.hydrate_results(
+            results,
+            limit=len(results),
+            max_workers=max_workers,
+        )
 
     def details_for(self, repo_id: str, repo_type: RepoType) -> RepoDetails | None:
         with self._lock:
@@ -1016,7 +1048,19 @@ def sorted_search_results(
 
     sort = _normalize_local_sort(sort)
     descending = default_sort_descending(sort) if descending is None else descending
-    return sorted(results, key=_sort_key(sort), reverse=descending)
+    sort_key = _sort_key(sort)
+    if sort not in METADATA_SORT_KEYS:
+        return sorted(results, key=sort_key, reverse=descending)
+
+    # Missing manifests must not jump to the top when an ascending metadata
+    # sort is selected. Keep known values ordered in the requested direction
+    # and put genuinely unavailable metadata at the end in deterministic order.
+    known = [item for item in results if _has_metadata_sort_value(item, sort)]
+    unknown = [item for item in results if not _has_metadata_sort_value(item, sort)]
+    return [
+        *sorted(known, key=sort_key, reverse=descending),
+        *sorted(unknown, key=lambda item: item.repo_id.lower()),
+    ]
 
 
 def _sort_key(sort: str):
@@ -1038,12 +1082,20 @@ def _sort_key(sort: str):
     return key
 
 
-def _fit_sort_value(item: SearchResult) -> float:
-    if item.fit.startswith("fits"):
-        return 2.0
-    if item.fit.startswith("too large"):
-        return 0.0
-    return 1.0
+def _has_metadata_sort_value(item: SearchResult, sort: str) -> bool:
+    if sort == "files":
+        return item.file_count > 0
+    if sort == "fit":
+        return _fit_sort_value(item) > 0
+    return (item.weight_bytes or item.size_bytes) > 0
+
+
+def _fit_sort_value(item: SearchResult) -> int:
+    """Order Fit by the bytes behind its label, not by its repeated text."""
+
+    if item.repo_type == "dataset":
+        return item.size_bytes
+    return item.weight_bytes or item.size_bytes
 
 
 def _artifact_matches(item: SearchResult, artifact_filter: str) -> bool:
@@ -1108,9 +1160,10 @@ def _fit_label(size_bytes: int, vram_limit_gb: float | None) -> str:
     if size_bytes <= 0:
         return "unknown"
     limit = vram_limit_gb * BYTES_PER_GIB
+    weight_size = format_bytes(size_bytes)
     if size_bytes <= limit:
-        return f"fits {vram_limit_gb:g}GB"
-    return f"too large for {vram_limit_gb:g}GB"
+        return f"fits {vram_limit_gb:g}GB · {weight_size} weights"
+    return f"too large for {vram_limit_gb:g}GB · {weight_size} weights"
 
 
 def _allow_patterns(repo_type: RepoType) -> tuple[str, ...]:

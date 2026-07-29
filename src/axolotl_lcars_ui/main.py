@@ -3121,8 +3121,8 @@ def _hub_page() -> None:
                         layout="grid",
                         columns=2,
                         description=(
-                            "All values are submitted together, then the visible page is hydrated "
-                            "with exact metadata before local filters are evaluated."
+                            "All values are submitted together, then the complete result snapshot "
+                            "is hydrated with exact metadata before local filters are evaluated."
                         ),
                     ),
                 ):
@@ -3152,8 +3152,8 @@ def _hub_page() -> None:
                         value=HF_LIMIT_OPTIONS[0],
                         id="hf-limit",
                         hint=(
-                            "Maximum lightweight results requested from the Hub. Exact metadata is "
-                            "hydrated one visible table page at a time."
+                            "Maximum results requested from the Hub. Exact metadata is loaded for "
+                            "the complete result snapshot before it is filtered, sorted, or shown."
                         ),
                     )
                     _seed_text("hf-sift", "")
@@ -3227,7 +3227,7 @@ def _hub_page() -> None:
                 ),
                 hint=(
                     "This is the saved atomic refinement state. Open Refine Results to change it; "
-                    "table-header sorting can then reorder the visible hydrated rows locally."
+                    "table-header sorting then reorders the complete enriched result set locally."
                 ),
             )
             if _is_active_action("hf-filter-results"):
@@ -3632,6 +3632,30 @@ def _hf_visible_page_results() -> list[Any]:
 def _hf_result_table_options() -> lcars.TableOptions:
     visible_results = _hf_visible_results()
     page, page_size = _hf_results_pagination(len(visible_results))
+    exact_count = sum(
+        STATE.hf.details_for(result.repo_id, result.repo_type) is not None
+        for result in visible_results
+    )
+    error_count = sum(
+        bool(STATE.hf.inspection_error_for(result.repo_id, result.repo_type))
+        for result in visible_results
+    )
+    pending_count = max(0, len(visible_results) - exact_count - error_count)
+    if visible_results and pending_count:
+        metadata_message = (
+            f"Loading exact metadata for {pending_count}/{len(visible_results)} results."
+        )
+    elif visible_results and error_count:
+        metadata_message = (
+            f"Exact metadata ready for {exact_count}/{len(visible_results)} results; "
+            f"{error_count} unavailable after retry."
+        )
+    elif visible_results:
+        metadata_message = (
+            f"Exact metadata ready for all {len(visible_results)} results."
+        )
+    else:
+        metadata_message = "Run a Hub search or inspect an owner/repository id to begin."
     sort_key = (
         STATE.hf.local_sort
         if STATE.hf.local_sort
@@ -3655,14 +3679,14 @@ def _hf_result_table_options() -> lcars.TableOptions:
     expanded_ids = [row_id for row_id in STATE.hf.expanded_result_ids if row_id in visible_ids]
     return lcars.TableOptions(
         description=(
-            "Select a row to target repository commands. Expand it to lazily load compatibility, "
+            "Select a row to target repository commands. Expand it to review compatibility, "
             "lineage, exact files, related models, and inline actions. Repository ids link to "
-            "Hugging Face and have dedicated copy controls. ◆ marks the active config and ● marks "
-            "an inspected manifest."
+            "Hugging Face and have dedicated copy controls. ◆ marks the active config and ● "
+            "confirms an exact manifest."
         ),
         feedback=lcars.WidgetFeedback(
             state="ready" if visible_results else "empty",
-            message="Run a Hub search or inspect an owner/repository id to begin.",
+            message=metadata_message,
         ),
         columns=[
             lcars.TableColumn(
@@ -4054,6 +4078,18 @@ def _hf_result_rows() -> list[lcars.TableRow]:
         inspected = _hf_result_is_inspected(result)
         status = _hf_result_status(result, configured=configured, current=current)
         error = STATE.hf.inspection_error_for(result.repo_id, result.repo_type)
+        fit_display = result.fit or "unknown"
+        artifact_display = result.quants or result.weights or result.size
+        if error:
+            if fit_display == "unknown":
+                fit_display = "metadata unavailable"
+            artifact_display = artifact_display or "metadata unavailable"
+        elif details is not None:
+            if fit_display == "unknown":
+                fit_display = "size unavailable"
+            artifact_display = artifact_display or "no sized artifact"
+        else:
+            artifact_display = artifact_display or "loading"
         rows.append(
             lcars.TableRow(
                 id=_hf_result_row_id(result),
@@ -4074,10 +4110,10 @@ def _hf_result_rows() -> list[lcars.TableRow]:
                         copy_value=result.repo_id,
                         status=status,
                     ),
-                    result.fit or "unknown",
+                    fit_display,
                     lcars.TableCell(
                         value=result.weight_bytes or result.size_bytes or 0,
-                        display=result.quants or result.weights or result.size or "inspect",
+                        display=artifact_display,
                     ),
                     result.file_count,
                     result.downloads,
@@ -4101,7 +4137,7 @@ def _handle_hf_table_action() -> None:
         table_state = payload.get("state")
         if not isinstance(table_state, dict):
             return
-        page, page_size = _remember_hf_results_pagination(table_state)
+        _remember_hf_results_pagination(table_state)
         expanded_ids = [
             str(row_id)
             for row_id in table_state.get("expanded_ids", [])
@@ -4166,13 +4202,7 @@ def _handle_hf_table_action() -> None:
             return
 
         if kind == "page":
-            attempted = STATE.hf.hydrate_results(
-                _hf_visible_page_results(),
-                limit=page_size,
-            )
             _update_hf_widgets()
-            if attempted:
-                _append_hf_logs()
             return
         return
 
@@ -5982,20 +6012,20 @@ def _hf_search_action(
         _set_widget_value("hf-artifact-filter", effective_artifact_filter)
         lcars.update("hf-artifact-filter", value=effective_artifact_filter)
     vram = _optional_float(vram_limit)
-    results = STATE.hf.search(
+    STATE.hf.search(
         query,
         repo_type,  # type: ignore[arg-type]
         sort=sort,
-        compatible_only=compatibility == HF_COMPATIBILITY_OPTIONS[0],
+        compatible_only=False,
         limit=_bounded_int(limit, default=12, minimum=1, maximum=50),
     )
     STATE.hf.vram_limit_gb = vram
-    _, page_size = _hf_results_pagination(len(results))
-    STATE.hf.hydrate_results(results[:page_size], limit=page_size)
-    results = STATE.hf.sift_results(
+    STATE.hf.hydrate_search_results()
+    STATE.hf.sift_results(
         text=sift,
         sort=local_sort,
         descending=_kept_sort_direction(local_sort),
+        compatible_only=compatibility == HF_COMPATIBILITY_OPTIONS[0],
         artifact_filter=effective_artifact_filter,
         quant_filter=quant_filter,
         fit_filter=fit_filter,
@@ -6179,7 +6209,19 @@ def _ollama_search_hf_action(model_name: str) -> None:
         return
     _reset_hf_results_page()
     query = model.hf_query or model.hf_hint or model.name.split(":", 1)[0]
-    results = STATE.hf.search(query, "model", limit=12, sort="downloads", compatible_only=True)
+    results = STATE.hf.search(
+        query,
+        "model",
+        limit=12,
+        sort="downloads",
+        compatible_only=False,
+    )
+    STATE.hf.hydrate_search_results()
+    results = STATE.hf.sift_results(
+        sort="downloads",
+        compatible_only=True,
+        vram_limit_gb=STATE.hf.vram_limit_gb,
+    )
     if model.hf_hint and not _looks_gguf(model.hf_hint):
         STATE.hf.inspect_repo(model.hf_hint, "model")
     _update_hf_widgets()

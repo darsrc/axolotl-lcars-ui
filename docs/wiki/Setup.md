@@ -170,8 +170,9 @@ the center of the workflow:
   result limit, metadata/artifact/weight filters, and model VRAM fit.
 - Search repo type and selected repository type are independent, so switching a search between
   models and datasets cannot silently retarget actions for an already selected repository.
-- The visible page is inspected automatically to populate model VRAM fit or dataset size,
-  weight/data formats, and exact file counts. Moving to another page hydrates that page.
+- The complete search snapshot is inspected before it is filtered, sorted, or paginated. Model
+  VRAM fit or dataset size, weight/data formats, and exact file counts therefore stay stable as
+  you move between pages or sort columns.
 - Expand a row for its full manifest, compatibility, lineage, exact per-file sizes, related
   fine-tunes, and inline config/download actions.
 - Repository ids and file paths have explicit copy controls; repository ids also open the

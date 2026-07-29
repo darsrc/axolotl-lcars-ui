@@ -37,6 +37,112 @@ class HuggingFaceManagerV44Tests(unittest.TestCase):
             [8, 4, 2],
         )
 
+    def test_fit_sort_uses_artifact_bytes_and_keeps_unknown_metadata_last(self) -> None:
+        results = [
+            SearchResult(
+                repo_id="example/large-fit",
+                repo_type="model",
+                weight_bytes=8_000,
+                fit="fits 24GB",
+            ),
+            SearchResult(
+                repo_id="example/unknown",
+                repo_type="model",
+                fit="unknown",
+            ),
+            SearchResult(
+                repo_id="example/small-fit",
+                repo_type="model",
+                weight_bytes=2_000,
+                fit="fits 24GB",
+            ),
+            SearchResult(
+                repo_id="example/too-large",
+                repo_type="model",
+                weight_bytes=32_000,
+                fit="too large for 24GB",
+            ),
+        ]
+
+        self.assertEqual(
+            [
+                result.repo_id
+                for result in sorted_search_results(
+                    results,
+                    "fit",
+                    descending=False,
+                )
+            ],
+            [
+                "example/small-fit",
+                "example/large-fit",
+                "example/too-large",
+                "example/unknown",
+            ],
+        )
+        self.assertEqual(
+            [
+                result.repo_id
+                for result in sorted_search_results(
+                    results,
+                    "fit",
+                    descending=True,
+                )
+            ],
+            [
+                "example/too-large",
+                "example/large-fit",
+                "example/small-fit",
+                "example/unknown",
+            ],
+        )
+
+    def test_complete_search_hydration_retries_errors_and_covers_every_result(
+        self,
+    ) -> None:
+        manager = HuggingFaceManager()
+        results = [
+            SearchResult(repo_id=f"example/model-{index}", repo_type="model")
+            for index in range(50)
+        ]
+        manager.all_search_results = results
+        failed_key = (results[20].repo_type, results[20].repo_id)
+        manager.inspection_errors[failed_key] = "temporary timeout"
+
+        with patch.object(
+            manager,
+            "hydrate_results",
+            return_value=len(results),
+        ) as hydrate:
+            attempted = manager.hydrate_search_results(max_workers=6)
+
+        self.assertEqual(attempted, len(results))
+        self.assertNotIn(failed_key, manager.inspection_errors)
+        hydrate.assert_called_once_with(
+            results,
+            limit=len(results),
+            max_workers=6,
+        )
+
+    def test_compatibility_filter_runs_on_enriched_local_results(self) -> None:
+        manager = HuggingFaceManager()
+        compatible = SearchResult(
+            repo_id="example/trainable",
+            repo_type="model",
+            compatibility="OK: trainable model",
+        )
+        blocked = SearchResult(
+            repo_id="example/runtime-only",
+            repo_type="model",
+            compatibility="Blocked: runtime-only artifact",
+            blocked=True,
+        )
+        manager.all_search_results = [blocked, compatible]
+
+        results = manager.sift_results(compatible_only=True)
+
+        self.assertEqual([result.repo_id for result in results], [compatible.repo_id])
+
     def test_dataset_cache_rows_keeps_ready_and_surfaces_incomplete_downloads(self) -> None:
         manager = HuggingFaceManager()
         with TemporaryDirectory() as temporary_directory:
@@ -120,7 +226,7 @@ class HuggingFaceManagerV44Tests(unittest.TestCase):
         self.assertEqual(attempted, 1)
         self.assertEqual(hydrated.file_count, 2)
         self.assertEqual(hydrated.weight_bytes, 2048)
-        self.assertEqual(hydrated.fit, "fits 24GB")
+        self.assertEqual(hydrated.fit, "fits 24GB · 2.0KB weights")
         self.assertEqual(manager.last_repo_id, lightweight.repo_id)
         self.assertEqual(manager.last_repo_type, lightweight.repo_type)
 
@@ -130,7 +236,10 @@ class HuggingFaceManagerV44Tests(unittest.TestCase):
         )
         manager._store_search_results([repeated_lightweight], "model")
         self.assertEqual(manager.search_results[0].file_count, 2)
-        self.assertEqual(manager.search_results[0].fit, "fits 24GB")
+        self.assertEqual(
+            manager.search_results[0].fit,
+            "fits 24GB · 2.0KB weights",
+        )
 
     def test_dataset_hydration_reports_data_size_instead_of_vram_fit(self) -> None:
         manager = HuggingFaceManager()
