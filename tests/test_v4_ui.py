@@ -71,7 +71,8 @@ class V44UiTests(unittest.TestCase):
         self.assertTrue(callable(lcars.popup))
         self.assertEqual(len(self.manifest.pages), 19)
         self.assertIn("lcars-options", self.manifest.pages)
-        self.assertEqual(self.manifest.pages["lora-data"].sizing, "content")
+        self.assertEqual(self.manifest.pages["lora-data"].sizing, "fill")
+        self.assertEqual(self.manifest.pages["lora-data"].archetype, "console")
         self.assertEqual(self.manifest.pages["hub"].sizing, "fill")
 
     def test_beginner_lora_studio_exposes_the_four_step_flow(self) -> None:
@@ -154,10 +155,28 @@ class V44UiTests(unittest.TestCase):
         self.assertTrue(
             all(option.description for option in self.widgets["lora-hf-dataset-format"].options)
         )
-        self.assertIn(
-            "one dataset",
-            self.widgets["lora-data-current-help"].content.lower(),
+        self.assertIn("one route", self.widgets["lora-data-current-help"].content.lower())
+        self.assertIn("not all three", self.widgets["lora-data-current-help"].content.lower())
+        route_guide = self.widgets["lora-data-route-guide"].content
+        self.assertIn("A · Hugging Face download", route_guide)
+        self.assertIn("B · JSON / JSONL file", route_guide)
+        self.assertIn("C · Build examples", route_guide)
+        self.assertIn("No completed download yet", route_guide)
+        workflow = self.widgets["lora-data-workflow"]
+        self.assertEqual(
+            [child.id for child in workflow.children if child.type != "popup"],
+            [
+                "lora-data-status-panel",
+                "lora-downloaded-dataset-panel",
+                "lora-dataset-loader-panel",
+                "lora-example-builder-panel",
+                "lora-data-editor-panel",
+                "lora-data-quality-panel",
+            ],
         )
+        self.assertTrue(all(child.span is None for child in workflow.children))
+        self.assertTrue(self.widgets["lora-data-quality-panel"].options.initial_collapsed)
+        self.assertIn("route", self.widgets["lora-data-next-step"].message.lower())
         uploader = self.widgets[main.LORA_DATASET_UPLOAD_ID]
         self.assertEqual(uploader.type, "file_upload")
         self.assertEqual(uploader.action_id, main.LORA_DATASET_UPLOAD_ACTION)
@@ -220,6 +239,54 @@ class V44UiTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.widgets["lora-test-log"].stream_id, main.LOG_OLLAMA)
+
+    def test_lora_data_guidance_names_the_blocker_and_one_next_action(self) -> None:
+        draft = main.DatasetReport(
+            source="./data/draft.jsonl",
+            source_kind="local",
+            dataset_type="chat_template",
+            example_count=6,
+            message_count=18,
+            placeholder_count=12,
+        )
+        level, message = main._lora_dataset_next_step({}, draft)
+        self.assertEqual(level, "yellow")
+        self.assertIn("12 EDIT ME/TODO", message)
+        self.assertIn("Route C", message)
+        self.assertEqual(
+            main._lora_authoring_progress(draft),
+            (
+                "6 EXAMPLES · 12 PLACEHOLDERS",
+                "warn",
+                "Replace every placeholder with the exact response the model should learn.",
+            ),
+        )
+        self.assertNotIn("?page=lora-train", main._lora_dataset_next_links({}, draft))
+
+        one_example = main.DatasetReport(
+            source="./data/one.jsonl",
+            source_kind="local",
+            dataset_type="chat_template",
+            example_count=1,
+            message_count=2,
+        )
+        level, message = main._lora_dataset_next_step({"val_set_size": 0.1}, one_example)
+        self.assertEqual(level, "yellow")
+        self.assertIn("ADD ONE MORE EXAMPLE", message)
+
+        route_guide = main._lora_dataset_route_guide(2)
+        self.assertIn("2 completed downloads ready", route_guide)
+        self.assertIn("file already on this computer", route_guide)
+        self.assertIn("when no dataset file exists yet", route_guide)
+
+        ready = main.DatasetReport(
+            source="./data/ready.jsonl",
+            source_kind="local",
+            dataset_type="chat_template",
+            example_count=2,
+            message_count=4,
+        )
+        self.assertIn("?page=lora-train", main._lora_dataset_next_links({}, ready))
 
     def test_internal_page_links_install_client_side_tab_navigation(self) -> None:
         app = main.FastAPI()

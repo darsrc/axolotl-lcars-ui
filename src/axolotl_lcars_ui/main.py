@@ -1260,29 +1260,47 @@ def _lora_data_page() -> None:
     _seed_text("lora-data-editor", editor_default)
     pending_import = _current_lora_dataset_import()
 
-    with lcars.page(
-        "LoRA Data",
-        id="lora-data",
-        layout="grid",
-        fillers=False,
-        sizing="content",
+    with (
+        lcars.page(
+            "LoRA Data",
+            id="lora-data",
+            layout="console",
+            fillers=False,
+            sizing="fill",
+        ),
+        lcars.console(
+            "Choose One Training Dataset Source",
+            color="golden-tanoi",
+            id="lora-data-workflow",
+            zone="full",
+            weight=12,
+            aspect="wide",
+            sizing="fill",
+            options=DENSE_PANEL_OPTIONS,
+        ),
     ):
         with lcars.data_panel(
-            "Current Training Dataset",
+            "Start Here · Current Training Dataset",
             color="golden-tanoi",
             id="lora-data-status-panel",
-            zone="full",
-            span=(4, 5),
-            weight=10,
-            aspect="wide",
-            group="lora-data",
             options=DENSE_PANEL_OPTIONS,
         ):
+            next_step_level, next_step_message = _lora_dataset_next_step(cfg, report)
+            lcars.alert(
+                next_step_message,
+                level=next_step_level,
+                id="lora-data-next-step",
+            )
             lcars.markdown(
-                "**This is the one dataset the Train page will use.** Choose a downloaded Hub "
-                "dataset, load an existing JSON/JSONL file, or build examples in the Studio. "
-                "Selecting one replaces the other as the active source.",
+                "**You need one route—not all three.** The Train page reads only `datasets[0]` "
+                "from the active YAML. Completing Route A, B, or C below replaces that source; "
+                "it does not combine datasets. Check the current source and its blocking issues "
+                "here before choosing what to do next.",
                 id="lora-data-current-help",
+            )
+            lcars.markdown(
+                _lora_dataset_route_guide(len(cached_datasets)),
+                id="lora-data-route-guide",
             )
             lcars.text(
                 _lora_active_dataset_summary(cfg, report, cached_dataset_ids),
@@ -1314,24 +1332,33 @@ def _lora_data_page() -> None:
                 id="lora-data-checks-table",
                 filter_columns={"Level", "Detail"},
             )
+            lcars.markdown(
+                _lora_dataset_next_links(cfg, report),
+                id="lora-data-next-links",
+                options=lcars.MarkdownOptions(link_target="_self"),
+            )
 
         with lcars.control_panel(
-            "Option A · Use A Downloaded Dataset",
+            "Route A · Use A Completed HF Hub Download",
             color="anakiwa",
             id="lora-downloaded-dataset-panel",
-            zone="full",
-            span=(4, 9),
-            weight=11,
-            aspect="wide",
-            group="lora-data-downloaded",
-            options=DENSE_PANEL_OPTIONS,
+            options=(COLLAPSIBLE_PANEL_OPTIONS if cached_datasets else COLLAPSED_PANEL_OPTIONS),
         ):
             lcars.markdown(
-                "Datasets downloaded through **HF Hub** live in the Hugging Face cache. Pick one "
-                "below and tell the Studio what one row looks like. The config uses its stable "
-                "`owner/name`; Hugging Face reuses the downloaded files automatically. You do "
-                "**not** paste downloaded data into the JSONL editor.",
+                "**Choose Route A only when HF Hub shows the download as complete.** Pick the "
+                "cached `owner/name`, match its real column shape, and set the training split. "
+                "Saving points the active YAML at that repository; it does not copy, delete, or "
+                "paste cached records into the local JSONL editor.",
                 id="lora-downloaded-dataset-help",
+            )
+            lcars.alert(
+                _lora_dataset_cache_notice(dataset_cache_rows, cached_datasets),
+                level="yellow",
+                id="lora-no-downloaded-datasets",
+                visible=(
+                    not bool(cached_datasets)
+                    or any(row.get("Status") == "INCOMPLETE" for row in dataset_cache_rows)
+                ),
             )
             _enhanced_table(
                 _lora_dataset_download_rows(dataset_cache_rows, configured_dataset),
@@ -1428,15 +1455,6 @@ def _lora_data_page() -> None:
                     downloaded_split,
                     downloaded_subset,
                 )
-            lcars.alert(
-                _lora_dataset_cache_notice(dataset_cache_rows, cached_datasets),
-                level="yellow",
-                id="lora-no-downloaded-datasets",
-                visible=(
-                    not bool(cached_datasets)
-                    or any(row.get("Status") == "INCOMPLETE" for row in dataset_cache_rows)
-                ),
-            )
             lcars.markdown(
                 "[Find datasets in HF Hub](?page=hub) · "
                 "[Watch downloads and cache](?page=content) · "
@@ -1446,22 +1464,17 @@ def _lora_data_page() -> None:
             )
 
         with lcars.control_panel(
-            "Option B · Load JSON / JSONL File",
+            "Route B · Load An Existing JSON / JSONL File",
             color="lilac",
             id="lora-dataset-loader-panel",
-            zone="full",
-            span=(4, 5),
-            weight=12,
-            aspect="wide",
-            group="lora-data-loader",
-            sizing="content",
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
-                "Choose an existing `.json` or `.jsonl` file instead of typing dataset paths or "
-                "pasting raw records. Drop it here and LCARS checks UTF-8 and JSON syntax, detects "
-                "common record shapes, validates every example, normalizes chat data to OpenAI "
-                "messages, and opens a checked preview **before** changing the active project.",
+                "**Use this route when you already have a dataset file.** 1) Drop or choose a "
+                "`.json`/`.jsonl` file. 2) Review the checked preview. 3) Name the normalized "
+                "local copy and save it. LCARS verifies UTF-8 and JSON syntax, detects common "
+                "record shapes, validates every example, and changes nothing in the project "
+                "until you accept the preview.",
                 id="lora-data-file-loader",
             )
             uploaded_files = lcars.file_upload(
@@ -1664,22 +1677,32 @@ def _lora_data_page() -> None:
                 pending_import = _apply_lora_dataset_import(import_filename)
 
         with lcars.control_panel(
-            "Option C · Build Examples In The Studio",
+            "Route C · Build Training Examples In The Studio",
             color="tanoi",
             id="lora-example-builder-panel",
-            zone="full",
-            span=(4, 10),
-            weight=12,
-            aspect="wide",
-            group="lora-data-builder",
-            options=DENSE_PANEL_OPTIONS,
+            options=(
+                COLLAPSIBLE_PANEL_OPTIONS
+                if not report.source
+                or (report.source_kind == "local" and not _lora_dataset_trainable(cfg, report))
+                else COLLAPSED_PANEL_OPTIONS
+            ),
         ):
             lcars.markdown(
-                "Use this route when you want to author behavior examples yourself. Write one "
-                "realistic prompt and the **exact answer you want the model to imitate**. Press "
-                "**Add & Save Local Example**, then repeat. Saving here switches the active "
-                "dataset from any Hub download to this project's local JSONL file.",
+                "**Use this route when you need to create the examples yourself—not when you "
+                "already have a dataset file.** Enter one realistic user request and the complete, "
+                "exact answer the model should learn. **Add & Save Local Example** writes one "
+                "conversation and activates this project's local JSONL dataset. Repeat with varied "
+                "prompts; do not describe the desired answer—write the answer itself.",
                 id="lora-example-builder-help",
+            )
+            authoring_value, authoring_status, authoring_detail = _lora_authoring_progress(report)
+            lcars.metric(
+                "Local Authoring Progress",
+                authoring_value,
+                status=authoring_status,
+                color="tanoi",
+                id="lora-example-progress",
+                options=lcars.MetricOptions(secondary_value=authoring_detail),
             )
             with lcars.form(
                 "One Training Conversation",
@@ -1723,15 +1746,15 @@ def _lora_data_page() -> None:
                 example_system = lcars.text_input(
                     "System Instruction · optional",
                     value="",
-                    placeholder="Only add this when the example needs a system role",
+                    placeholder="Only add this if inference will provide the same system role",
                     autocomplete=False,
                     id="lora-example-system",
                     options=lcars.TextInputOptions(
                         multiline=True,
                         rows=1,
                         description=(
-                            "Usually leave this blank; repeated system text can make the adapter "
-                            "depend on it."
+                            "Usually leave this blank. Add it only when the trained model will "
+                            "receive the same kind of system instruction at inference time."
                         ),
                     ),
                 )
@@ -1744,21 +1767,17 @@ def _lora_data_page() -> None:
                     system_prompt=example_system,
                 )
             lcars.text(
-                "Your first form example replaces the untouched EDIT ME starter template. "
-                "Later examples are appended. The raw editor below is optional and belongs only "
-                "to this local-dataset route.",
+                "If the local file is still the untouched EDIT ME starter, the first saved "
+                "conversation replaces that template instead of appending to it. Later examples "
+                "append normally. The raw JSONL tool below is optional and affects only this "
+                "local-dataset route.",
                 id="lora-example-builder-note",
             )
 
         with lcars.control_panel(
-            "Option C Advanced · Raw JSONL",
+            "Route C Tools · Raw JSONL (Advanced)",
             color="golden-tanoi",
             id="lora-data-editor-panel",
-            zone="full",
-            span=(4, 1),
-            weight=2,
-            aspect="wide",
-            group="lora-data-advanced",
             options=COLLAPSED_PANEL_OPTIONS,
         ):
             lcars.markdown(
@@ -1825,16 +1844,11 @@ def _lora_data_page() -> None:
                 id="lora-data-backup-note",
             )
 
-        with lcars.data_panel(
-            "Quality Beats Quantity",
+        with lcars.control_panel(
+            "Before Training · Dataset Quality Checklist",
             color="tanoi",
             id="lora-data-quality-panel",
-            zone="full",
-            span=(4, 2),
-            weight=9,
-            aspect="wide",
-            group="lora-data-guide",
-            options=COLLAPSIBLE_PANEL_OPTIONS,
+            options=COLLAPSED_PANEL_OPTIONS,
         ):
             _enhanced_table(
                 [
@@ -5245,6 +5259,95 @@ def _lora_dataset_status(cfg: dict[str, Any], dataset: DatasetReport) -> str:
     return dataset.status
 
 
+def _lora_dataset_next_step(
+    cfg: dict[str, Any],
+    dataset: DatasetReport,
+) -> tuple[str, str]:
+    """Return an alert level and one concrete instruction for the active dataset."""
+
+    if _lora_dataset_trainable(cfg, dataset):
+        return (
+            "success",
+            "DATASET READY. You can continue to 3 · Train. Return here only if you want to "
+            "replace the active source; choosing any route below replaces datasets[0].",
+        )
+    if dataset.errors:
+        return (
+            "red",
+            f"TRAINING IS BLOCKED. {dataset.errors[0]} Fix the active source, or replace it "
+            "with exactly one of Routes A, B, or C below.",
+        )
+    if dataset.placeholder_count:
+        return (
+            "yellow",
+            f"LOCAL DRAFT ACTIVE. Replace the {dataset.placeholder_count} EDIT ME/TODO "
+            "placeholders with complete ideal answers. Use Route C below, or replace the draft "
+            "with Route A or B.",
+        )
+    if dataset.ready:
+        return (
+            "yellow",
+            "ADD ONE MORE EXAMPLE. The configured validation split needs at least two local "
+            "examples. Add one in Route C, or replace the dataset with Route A or B.",
+        )
+    return (
+        "info",
+        "NO TRAINABLE DATASET YET. Pick exactly one route below: A for a completed Hugging Face "
+        "download, B for a JSON/JSONL file you already have, or C to write examples here.",
+    )
+
+
+def _lora_dataset_route_guide(ready_downloads: int) -> str:
+    hub_state = (
+        f"**{ready_downloads} completed download{'s' if ready_downloads != 1 else ''} ready.**"
+        if ready_downloads
+        else "**No completed download yet—open HF Hub first.**"
+    )
+    return (
+        "**Choose the route that matches what you already have:**\n\n"
+        f"- **A · Hugging Face download** — use a dataset that already finished downloading. "
+        f"This points `datasets[0]` at its cached `owner/name`. {hub_state}\n"
+        "- **B · JSON / JSONL file** — use a file already on this computer. LCARS checks and "
+        "previews it, then saves and activates a normalized local copy.\n"
+        "- **C · Build examples** — use the Studio when no dataset file exists yet. Each save "
+        "adds one complete user/ideal-answer conversation to local JSONL."
+    )
+
+
+def _lora_dataset_next_links(cfg: dict[str, Any], dataset: DatasetReport) -> str:
+    settings_link = "[Open full dataset settings](?page=setup)"
+    if _lora_dataset_trainable(cfg, dataset):
+        return f"[Dataset ready → Continue to 3 · Train](?page=lora-train) · {settings_link}"
+    return f"**Next:** complete the matching route below. {settings_link}"
+
+
+def _lora_authoring_progress(dataset: DatasetReport) -> tuple[str, str, str]:
+    if dataset.source_kind != "local":
+        return (
+            "NO LOCAL DRAFT ACTIVE",
+            "warn",
+            "Submitting the first example creates and activates this project's local JSONL file.",
+        )
+    examples = dataset.example_count or 0
+    if dataset.placeholder_count:
+        return (
+            f"{examples} EXAMPLES · {dataset.placeholder_count} PLACEHOLDERS",
+            "warn",
+            "Replace every placeholder with the exact response the model should learn.",
+        )
+    if dataset.ready:
+        return (
+            f"{examples} EXAMPLES · READY",
+            "ok",
+            "New examples append to the active local dataset.",
+        )
+    return (
+        f"{examples} EXAMPLES · INCOMPLETE",
+        "warn",
+        "Add a complete user prompt and ideal answer before training.",
+    )
+
+
 def _lora_gate_detail(
     errors: list[PreflightIssue],
     dataset: DatasetReport,
@@ -7050,13 +7153,34 @@ def _update_lora_widgets() -> None:
             mode="json"
         ),
     )
+    next_step_level, next_step_message = _lora_dataset_next_step(cfg, dataset)
+    lcars.update(
+        "lora-data-next-step",
+        message=next_step_message,
+        severity=next_step_level,
+    )
     lcars.update(
         "lora-data-active-source",
         content=_lora_active_dataset_summary(cfg, dataset, cached_dataset_ids),
     )
     lcars.update(
+        "lora-data-route-guide",
+        content=_lora_dataset_route_guide(len(cached_datasets)),
+    )
+    lcars.update(
+        "lora-data-next-links",
+        content=_lora_dataset_next_links(cfg, dataset),
+    )
+    lcars.update(
         "lora-data-checks-table",
         **_table_payload(_lora_dataset_issue_rows(dataset)),
+    )
+    authoring_value, authoring_status, authoring_detail = _lora_authoring_progress(dataset)
+    lcars.update(
+        "lora-example-progress",
+        value=authoring_value,
+        status=authoring_status,
+        options=lcars.MetricOptions(secondary_value=authoring_detail).model_dump(mode="json"),
     )
     lcars.update(
         "lora-train-gate",
