@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import html
 import math
-import secrets
 import threading
 import time
 import webbrowser
@@ -16,7 +15,7 @@ from typing import Any, Callable, Literal
 
 import lcars_ui as lcars
 import uvicorn
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.datastructures import State
 
@@ -92,9 +91,11 @@ HF_RESULTS_PAGE_KEY = "hf-results-page"
 HF_RESULTS_PAGE_SIZE_KEY = "hf-results-page-size"
 HF_RESULTS_PAGE_SIZE = 10
 HF_RESULTS_PAGE_SIZES = (10, 25, 50, 100)
-LORA_DATASET_UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+LORA_DATASET_UPLOAD_ACTION = "lora-dataset-upload"
+LORA_DATASET_UPLOAD_ID = "lora-data-file-upload"
+LORA_DATASET_PREVIEW_POPUP_ID = "lora-dataset-preview-popup"
+LORA_DATASET_UPLOAD_MAX_BYTES = 25_000_000
 LORA_DATASET_IMPORT_TTL_SECONDS = 15 * 60
-LORA_DATASET_IMPORT_MAX_PENDING = 3
 SEARCH_INPUT_OPTIONS = lcars.TextInputOptions(
     input_type="search",
     commit="enter",
@@ -290,9 +291,7 @@ CONFIG_VALUE_HINTS: dict[str, dict[str, str]] = {
             "Axolotl's Qwen 3.5/3.6 role and control-token template. Required by the guided "
             "Qwen model templates."
         ),
-        "gemma4": (
-            "Axolotl's Gemma 4 conversation format, including Gemma 4 turn boundaries."
-        ),
+        "gemma4": ("Axolotl's Gemma 4 conversation format, including Gemma 4 turn boundaries."),
     },
 }
 
@@ -472,6 +471,14 @@ class AppState:
     lora_tuned_response: str = ""
     lora_base_response_meta: str = "Not tested yet."
     lora_tuned_response_meta: str = "Not tested yet."
+    pending_lora_dataset: _PendingDatasetImport | None = field(
+        default=None,
+        repr=False,
+    )
+    pending_lora_dataset_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        repr=False,
+    )
 
     def refresh_preflight(self) -> list[PreflightIssue]:
         try:
@@ -764,6 +771,7 @@ def build_ui() -> None:
         subtitle="CONFIGURATION / TELEMETRY / CONTENT OPS",
         header_color="tanoi",
         sound_enabled=True,
+        settings_page=True,
     )
 
     lcars.nav("LoRA Studio", page="lora", color="pale-canary")
@@ -812,7 +820,13 @@ def _lora_home_page() -> None:
     steps = _lora_journey_rows(cfg, dataset, bool(artifacts))
     completed = sum(1 for row in steps if row["Status"] == "READY")
 
-    with lcars.page("LoRA Studio", id="lora", layout="grid", fillers=False):
+    with lcars.page(
+        "LoRA Studio",
+        id="lora",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.data_panel(
             "Your First LoRA",
             color="pale-canary",
@@ -951,7 +965,13 @@ def _lora_setup_page() -> None:
     if preset_default not in LORA_PRESET_KEYS:
         preset_default = recommended_key
 
-    with lcars.page("LoRA Setup", id="lora-setup", layout="grid", fillers=False):
+    with lcars.page(
+        "LoRA Setup",
+        id="lora-setup",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.control_panel(
             "Make My LoRA",
             color="tanoi",
@@ -1238,8 +1258,15 @@ def _lora_data_page() -> None:
     )
     _seed_text("lora-data-filename", filename_default)
     _seed_text("lora-data-editor", editor_default)
+    pending_import = _current_lora_dataset_import()
 
-    with lcars.page("LoRA Data", id="lora-data", layout="grid", fillers=False):
+    with lcars.page(
+        "LoRA Data",
+        id="lora-data",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.data_panel(
             "Current Training Dataset",
             color="golden-tanoi",
@@ -1337,9 +1364,7 @@ def _lora_data_page() -> None:
                     disabled=not bool(cached_datasets),
                     settings=lcars.ChoiceOptions(
                         searchable=True,
-                        description=(
-                            "Only completed Hugging Face dataset downloads appear here."
-                        ),
+                        description=("Only completed Hugging Face dataset downloads appear here."),
                     ),
                     hint=(
                         "This list includes only complete, readable dataset snapshots from the "
@@ -1409,10 +1434,7 @@ def _lora_data_page() -> None:
                 id="lora-no-downloaded-datasets",
                 visible=(
                     not bool(cached_datasets)
-                    or any(
-                        row.get("Status") == "INCOMPLETE"
-                        for row in dataset_cache_rows
-                    )
+                    or any(row.get("Status") == "INCOMPLETE" for row in dataset_cache_rows)
                 ),
             )
             lcars.markdown(
@@ -1432,17 +1454,73 @@ def _lora_data_page() -> None:
             weight=12,
             aspect="wide",
             group="lora-data-loader",
+            sizing="content",
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.markdown(
                 "Choose an existing `.json` or `.jsonl` file instead of typing dataset paths or "
-                "pasting raw records. The loader checks UTF-8 and JSON syntax, detects common "
-                "record shapes, validates every example, normalizes chat data to OpenAI messages, "
-                "and shows a preview **before** changing the active project.\n\n"
-                "### [Choose and inspect a dataset file →](/lora/data/import)",
+                "pasting raw records. Drop it here and LCARS checks UTF-8 and JSON syntax, detects "
+                "common record shapes, validates every example, normalizes chat data to OpenAI "
+                "messages, and opens a checked preview **before** changing the active project.",
                 id="lora-data-file-loader",
-                options=lcars.MarkdownOptions(link_target="_self"),
             )
+            uploaded_files = lcars.file_upload(
+                "Drop Dataset Here Or Choose A File",
+                action_id=LORA_DATASET_UPLOAD_ACTION,
+                accept=[
+                    ".json",
+                    ".jsonl",
+                    "application/json",
+                    "application/x-ndjson",
+                ],
+                multiple=False,
+                max_files=1,
+                max_bytes=LORA_DATASET_UPLOAD_MAX_BYTES,
+                color="lilac",
+                id=LORA_DATASET_UPLOAD_ID,
+                sizing="content",
+                hint=(
+                    "The file is read only for this validation request. LCARS does not retain the "
+                    "raw upload or write it into the project."
+                ),
+            )
+            if uploaded_files:
+                pending_import = _stage_lora_dataset_import(uploaded_files[0])
+            staged_dataset = pending_import.dataset if pending_import is not None else None
+            lcars.metric(
+                "Checked File",
+                staged_dataset.source_name if staged_dataset is not None else "NONE STAGED",
+                status=(
+                    "warn"
+                    if staged_dataset is not None and staged_dataset.report.warnings
+                    else ("ok" if staged_dataset is not None else "warn")
+                ),
+                color="lilac",
+                id="lora-data-file-loader-status",
+                options=lcars.MetricOptions(
+                    secondary_value=(
+                        f"{staged_dataset.detected_format} · "
+                        f"{staged_dataset.report.example_count or 0} examples"
+                        if staged_dataset is not None
+                        else "Upload a JSON or JSONL file to check it."
+                    )
+                ),
+            )
+            if lcars.button(
+                "Review Checked Dataset",
+                color="anakiwa",
+                id="lora-data-review-upload",
+                disabled=staged_dataset is None,
+            ):
+                if staged_dataset is None:
+                    lcars.update("lora-data-review-upload", disabled=True)
+                    lcars.notify(
+                        "That checked dataset expired. Upload the file again.",
+                        level="warning",
+                        title="Dataset preview",
+                    )
+                else:
+                    lcars.update(LORA_DATASET_PREVIEW_POPUP_ID, open=True)
             _enhanced_table(
                 [
                     {
@@ -1473,10 +1551,117 @@ def _lora_data_page() -> None:
                 filter_columns={"Input shape", "Recognized columns", "Loaded as"},
             )
             lcars.text(
-                "Files are limited to 64MB in the browser loader. Use HF Hub for larger datasets. "
-                "Nothing is written until the checked preview is explicitly accepted.",
+                "Files are limited to 25MB by LCARS' bounded upload endpoint. Use HF Hub for "
+                "larger datasets. Raw bytes are request-scoped, and nothing is written until the "
+                "checked preview is explicitly accepted.",
                 id="lora-data-file-loader-note",
             )
+
+        with lcars.popup(
+            "Checked Dataset Preview",
+            open=False,
+            modal=True,
+            dismissible=True,
+            draggable=True,
+            resizable=True,
+            width=920,
+            height=700,
+            color="lilac",
+            id=LORA_DATASET_PREVIEW_POPUP_ID,
+        ):
+            staged_dataset = pending_import.dataset if pending_import is not None else None
+            lcars.text(
+                (
+                    staged_dataset.source_name
+                    if staged_dataset is not None
+                    else "No checked upload is staged."
+                ),
+                size="mono",
+                color="anakiwa",
+                id="lora-dataset-preview-source",
+                options=lcars.TextOptions(
+                    description="The original file is never modified.",
+                    selectable=True,
+                    copyable=True,
+                    wrap="wrap",
+                ),
+            )
+            lcars.metric(
+                "Detected Format",
+                (staged_dataset.detected_format if staged_dataset is not None else "NOT CHECKED"),
+                status="ok" if staged_dataset is not None else "warn",
+                color="lilac",
+                id="lora-dataset-preview-format",
+            )
+            lcars.metric(
+                "Validated Examples",
+                str(staged_dataset.report.example_count or 0)
+                if staged_dataset is not None
+                else "0",
+                status="ok" if staged_dataset is not None else "warn",
+                color="tanoi",
+                id="lora-dataset-preview-examples",
+            )
+            lcars.metric(
+                "Messages",
+                str(staged_dataset.report.message_count) if staged_dataset is not None else "0",
+                status="ok" if staged_dataset is not None else "warn",
+                color="golden-tanoi",
+                id="lora-dataset-preview-messages",
+            )
+            preview_advice = _lora_dataset_import_advice(staged_dataset)
+            lcars.alert(
+                preview_advice,
+                level=(
+                    "yellow"
+                    if staged_dataset is not None and staged_dataset.report.warnings
+                    else ("success" if staged_dataset is not None else "info")
+                ),
+                id="lora-dataset-preview-advice",
+            )
+            preview_rows = _lora_dataset_import_preview_rows(staged_dataset)
+            _enhanced_table(
+                preview_rows,
+                title="Normalized Training Preview",
+                id="lora-dataset-preview-table",
+                filter_columns={"Input", "Ideal output"},
+                numeric_columns={"Example", "Messages"},
+            )
+            with lcars.form(
+                "Use Checked Dataset",
+                action_id="lora-dataset-import-apply",
+                submit_label="Save And Use This Dataset",
+                id="lora-dataset-import-form",
+                color="tanoi",
+                disabled=staged_dataset is None,
+                options=lcars.FormOptions(
+                    layout="stack",
+                    description=(
+                        "This writes the normalized JSONL copy into ./data and makes it "
+                        "datasets[0] in the active config."
+                    ),
+                ),
+            ):
+                import_filename = lcars.text_input(
+                    "Project Dataset Filename",
+                    value=(
+                        staged_dataset.suggested_filename
+                        if staged_dataset is not None
+                        else "training-data.jsonl"
+                    ),
+                    placeholder="training-data.jsonl",
+                    autocomplete=False,
+                    id="lora-dataset-import-filename",
+                    options=lcars.TextInputOptions(
+                        validation=lcars.ValidationOptions(
+                            required=True,
+                            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.jsonl$",
+                            message="Use a simple .jsonl filename.",
+                        )
+                    ),
+                )
+            if _is_active_action("lora-dataset-import-apply"):
+                pending_import = _apply_lora_dataset_import(import_filename)
 
         with lcars.control_panel(
             "Option C · Build Examples In The Studio",
@@ -1695,7 +1880,13 @@ def _lora_train_page() -> None:
     snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
     gpu = snapshot.gpus[0] if snapshot.gpus else None
 
-    with lcars.page("LoRA Train", id="lora-train", layout="console", fillers=False):
+    with lcars.page(
+        "LoRA Train",
+        id="lora-train",
+        layout="console",
+        fillers=False,
+        sizing="fill",
+    ):
         with lcars.data_panel(
             "Beginner Launch Gate",
             color="red",
@@ -1771,9 +1962,7 @@ def _lora_train_page() -> None:
             lcars.metric(
                 "GPU",
                 f"{gpu.utilization:.0f}%" if gpu is not None else "NOT DETECTED",
-                status=(
-                    _percent_status(gpu.utilization) if gpu is not None else "warn"
-                ),
+                status=(_percent_status(gpu.utilization) if gpu is not None else "warn"),
                 color="anakiwa",
                 id="lora-train-gpu",
                 options=lcars.MetricOptions(
@@ -1792,8 +1981,7 @@ def _lora_train_page() -> None:
                 id="lora-train-ram",
                 options=lcars.MetricOptions(
                     secondary_value=(
-                        f"{format_bytes(snapshot.ram_used)} / "
-                        f"{format_bytes(snapshot.ram_total)}"
+                        f"{format_bytes(snapshot.ram_used)} / {format_bytes(snapshot.ram_total)}"
                     )
                 ),
             )
@@ -1938,7 +2126,13 @@ def _lora_test_page() -> None:
     )
     select_options = _lora_ollama_select_options(model_names)
 
-    with lcars.page("LoRA Test", id="lora-test", layout="grid", fillers=False):
+    with lcars.page(
+        "LoRA Test",
+        id="lora-test",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.data_panel(
             "Ollama Adapter Gate",
             color="lilac",
@@ -2189,7 +2383,13 @@ def _lora_test_page() -> None:
 
 
 def _command_page() -> None:
-    with lcars.page("Command", id="command", layout="grid", fillers=False):
+    with lcars.page(
+        "Command",
+        id="command",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.data_panel(
             "Launch Readiness",
             color="tanoi",
@@ -2299,7 +2499,13 @@ def _command_page() -> None:
 
 
 def _config_page() -> None:
-    with lcars.page("Config", id="config", layout="grid", fillers=False):
+    with lcars.page(
+        "Config",
+        id="config",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.control_panel(
             "Config Files",
             color="golden-tanoi",
@@ -2389,7 +2595,13 @@ def _config_page() -> None:
 
 
 def _config_setup_page() -> None:
-    with lcars.page("Setup", id="config-setup", layout="grid", fillers=False):
+    with lcars.page(
+        "Setup",
+        id="config-setup",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         _setup_smart_panel()
         with lcars.data_panel(
             "Defaults / Examples",
@@ -2465,7 +2677,13 @@ def _config_group_page(
     groups: tuple[str, ...],
     suffix: str,
 ) -> None:
-    with lcars.page(title, id=page_id, layout="grid", fillers=False):
+    with lcars.page(
+        title,
+        id=page_id,
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         for group_name in groups:
             group_id = group_name.lower().replace(" ", "-").replace("/", "")
             with lcars.padd(
@@ -2483,7 +2701,13 @@ def _config_group_page(
 
 def _config_advanced_page() -> None:
     advanced_groups = ("Run Safety", "Model", "Dataset", "Sequence / Packing")
-    with lcars.page("Advanced", id="config-advanced", layout="grid", fillers=False):
+    with lcars.page(
+        "Advanced",
+        id="config-advanced",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         for group_name in advanced_groups:
             group_keys = {
                 spec.key
@@ -2512,7 +2736,13 @@ def _config_advanced_page() -> None:
 
 def _run_page() -> None:
     STATE.workflow.sync_active_config(STATE.config_store.active_name)
-    with lcars.page("Workflow", id="run", layout="telemetry", fillers=False):
+    with lcars.page(
+        "Workflow",
+        id="run",
+        layout="telemetry",
+        fillers=False,
+        sizing="fill",
+    ):
         with lcars.data_panel(
             "Axolotl Workflow",
             color="red",
@@ -2625,7 +2855,13 @@ def _run_page() -> None:
 
 
 def _console_page() -> None:
-    with lcars.page("Console", id="console", layout="console", fillers=False):
+    with lcars.page(
+        "Console",
+        id="console",
+        layout="console",
+        fillers=False,
+        sizing="fill",
+    ):
         with lcars.data_panel(
             "Process Output",
             color="red",
@@ -2739,7 +2975,13 @@ def _console_page() -> None:
 
 
 def _resources_page() -> None:
-    with lcars.page("Resources", id="resources", layout="console", fillers=False):
+    with lcars.page(
+        "Resources",
+        id="resources",
+        layout="console",
+        fillers=False,
+        sizing="fill",
+    ):
         snapshot = STATE.telemetry.latest or STATE.telemetry.sample()
         cfg = _load_config_or_empty()
         primary_disk = _primary_disk(snapshot.disks)
@@ -2945,7 +3187,13 @@ def _resources_page() -> None:
 
 def _hub_page() -> None:
     _handle_hf_table_action()
-    with lcars.page("HF Hub", id="hub", layout="telemetry", fillers=False):
+    with lcars.page(
+        "HF Hub",
+        id="hub",
+        layout="telemetry",
+        fillers=False,
+        sizing="fill",
+    ):
         repo_id = _widget_value("hf-repo-id", STATE.hf.last_repo_id).strip()
         target_repo_type = _widget_value(
             "hf-repo-type",
@@ -2962,6 +3210,7 @@ def _hub_page() -> None:
             weight=12,
             aspect="wide",
             group="hf-browser",
+            sizing="fill",
             options=DENSE_PANEL_OPTIONS,
         ):
             lcars.table(
@@ -2980,6 +3229,7 @@ def _hub_page() -> None:
             weight=10,
             aspect="wide",
             group="hf-browser",
+            sizing="content",
             options=DENSE_PANEL_OPTIONS,
         ):
             with lcars.form(
@@ -3170,126 +3420,13 @@ def _hub_page() -> None:
                     "metadata, artifact, weight-format, and model-fit constraints atomically."
                 ),
             )
-            lcars.button(
+            if lcars.button(
                 "Refine Results",
                 color="blue-bell",
                 id="hf-refine-results",
-                hint=(
-                    "Open the advanced filter workspace. Its controls live in this pinned popover "
-                    "so the main operations rail stays focused on search and repository actions."
-                ),
-            )
-            with lcars.hint(
-                "hf-refine-results",
-                title="Advanced Result Filters",
-                trigger=["click", "press"],
-                placement="left",
-                max_width=620,
+                hint=("Open the movable filter workspace without shrinking the repository table."),
             ):
-                with lcars.form(
-                    "Refine Current Query",
-                    action_id="hf-filter-results",
-                    submit_label="Apply / Refresh Results",
-                    id="hf-filter-form",
-                    color="blue-bell",
-                    options=lcars.FormOptions(
-                        layout="grid",
-                        columns=2,
-                        description=(
-                            "All values are submitted together, then the complete result snapshot "
-                            "is hydrated with exact metadata before local filters are evaluated."
-                        ),
-                    ),
-                ):
-                    sort = lcars.select(
-                        "Hub Sort",
-                        HF_SORT_OPTIONS,
-                        value=HF_SORT_OPTIONS[0],
-                        id="hf-sort",
-                        hint=(
-                            "Ordering sent to Hugging Face before exact metadata is hydrated. "
-                            "Clicking a visible table column then applies a local sort."
-                        ),
-                    )
-                    compatibility = lcars.select(
-                        "Compatibility",
-                        HF_COMPATIBILITY_OPTIONS,
-                        value=HF_COMPATIBILITY_OPTIONS[0],
-                        id="hf-compatibility",
-                        hint=(
-                            "Compatible-only hides known runtime-only artifacts. Include warnings "
-                            "when auditing GGUF, incomplete, or unusual repositories."
-                        ),
-                    )
-                    limit = lcars.select(
-                        "Result Limit",
-                        HF_LIMIT_OPTIONS,
-                        value=HF_LIMIT_OPTIONS[0],
-                        id="hf-limit",
-                        hint=(
-                            "Maximum results requested from the Hub. Exact metadata is loaded for "
-                            "the complete result snapshot before it is filtered, sorted, or shown."
-                        ),
-                    )
-                    _seed_text("hf-sift", "")
-                    sift = lcars.text_input(
-                        "Metadata Contains",
-                        placeholder="repo, tag, quant, family",
-                        autocomplete=False,
-                        id="hf-sift",
-                        options=SEARCH_INPUT_OPTIONS,
-                        hint=(
-                            "Case-insensitive local match across repository id, tags, pipeline, "
-                            "library, weights, quantization, and compatibility."
-                        ),
-                    )
-                    artifact_filter = lcars.select(
-                        "Artifact",
-                        HF_ARTIFACT_FILTER_OPTIONS,
-                        value=HF_ARTIFACT_FILTER_OPTIONS[0],
-                        id="hf-artifact-filter",
-                        hint=(
-                            "Narrow models, PEFT adapters, datasets, or runtime-only artifacts "
-                            "after repository metadata has been classified."
-                        ),
-                    )
-                    quant_filter = lcars.select(
-                        "Weight Format",
-                        HF_QUANT_FILTER_OPTIONS,
-                        value=HF_QUANT_FILTER_OPTIONS[0],
-                        id="hf-quant-filter",
-                        hint=(
-                            "Filter model weight formats. Dataset searches ignore this model-only "
-                            "constraint rather than disappearing unexpectedly."
-                        ),
-                    )
-                    vram_limit = lcars.number_input(
-                        "Model VRAM Budget",
-                        value=float(STATE.hf.vram_limit_gb or 24),
-                        min=1,
-                        max=256,
-                        step=1,
-                        id="hf-vram-limit",
-                        options=lcars.NumberInputOptions(
-                            precision=0,
-                            suffix=" GB",
-                            required=True,
-                        ),
-                        hint=(
-                            "A first-pass fit comparison against known model weight bytes. It is "
-                            "guidance, not a guarantee of training memory use."
-                        ),
-                    )
-                    fit_filter = lcars.select(
-                        "Model VRAM Fit",
-                        HF_FIT_FILTER_OPTIONS,
-                        value="any",
-                        id="hf-fit-filter",
-                        hint=(
-                            "Keep every model, only models with known size, or only weights within "
-                            "the stated VRAM budget. Dataset rows report data size instead."
-                        ),
-                    )
+                lcars.update("hf-filter-popup", open=True)
             lcars.text(
                 _current_hf_filter_summary(),
                 size="mono",
@@ -3305,6 +3442,128 @@ def _hub_page() -> None:
                     "table-header sorting then reorders the complete enriched result set locally."
                 ),
             )
+
+        with lcars.popup(
+            "HF Result Filters",
+            open=False,
+            modal=False,
+            dismissible=True,
+            draggable=True,
+            resizable=True,
+            width=760,
+            height=690,
+            color="blue-bell",
+            id="hf-filter-popup",
+        ):
+            lcars.markdown(
+                "Refinement is applied as one transaction: Hub ordering and result limit run "
+                "first, exact metadata is hydrated for the complete snapshot, then compatibility, "
+                "artifact, format, text, and VRAM-fit filters run locally.",
+                id="hf-filter-popup-help",
+            )
+            with lcars.form(
+                "Refine Current Query",
+                action_id="hf-filter-results",
+                submit_label="Apply / Refresh Results",
+                id="hf-filter-form",
+                color="blue-bell",
+                options=lcars.FormOptions(
+                    layout="grid",
+                    columns=2,
+                    description=(
+                        "All values are submitted together; no partial filter state is applied."
+                    ),
+                ),
+            ):
+                sort = lcars.select(
+                    "Hub Sort",
+                    HF_SORT_OPTIONS,
+                    value=HF_SORT_OPTIONS[0],
+                    id="hf-sort",
+                    hint=(
+                        "Ordering sent to Hugging Face before exact metadata is hydrated. "
+                        "Clicking a visible table column then applies a local sort."
+                    ),
+                )
+                compatibility = lcars.select(
+                    "Compatibility",
+                    HF_COMPATIBILITY_OPTIONS,
+                    value=HF_COMPATIBILITY_OPTIONS[0],
+                    id="hf-compatibility",
+                    hint=(
+                        "Compatible-only hides known runtime-only artifacts. Include warnings "
+                        "when auditing GGUF, incomplete, or unusual repositories."
+                    ),
+                )
+                limit = lcars.select(
+                    "Result Limit",
+                    HF_LIMIT_OPTIONS,
+                    value=HF_LIMIT_OPTIONS[0],
+                    id="hf-limit",
+                    hint=(
+                        "Maximum results requested from the Hub. Exact metadata is loaded for "
+                        "the complete result snapshot before it is filtered, sorted, or shown."
+                    ),
+                )
+                _seed_text("hf-sift", "")
+                sift = lcars.text_input(
+                    "Metadata Contains",
+                    placeholder="repo, tag, quant, family",
+                    autocomplete=False,
+                    id="hf-sift",
+                    options=SEARCH_INPUT_OPTIONS,
+                    hint=(
+                        "Case-insensitive local match across repository id, tags, pipeline, "
+                        "library, weights, quantization, and compatibility."
+                    ),
+                )
+                artifact_filter = lcars.select(
+                    "Artifact",
+                    HF_ARTIFACT_FILTER_OPTIONS,
+                    value=HF_ARTIFACT_FILTER_OPTIONS[0],
+                    id="hf-artifact-filter",
+                    hint=(
+                        "Narrow models, PEFT adapters, datasets, or runtime-only artifacts "
+                        "after repository metadata has been classified."
+                    ),
+                )
+                quant_filter = lcars.select(
+                    "Weight Format",
+                    HF_QUANT_FILTER_OPTIONS,
+                    value=HF_QUANT_FILTER_OPTIONS[0],
+                    id="hf-quant-filter",
+                    hint=(
+                        "Filter model weight formats. Dataset searches ignore this model-only "
+                        "constraint rather than disappearing unexpectedly."
+                    ),
+                )
+                vram_limit = lcars.number_input(
+                    "Model VRAM Budget",
+                    value=float(STATE.hf.vram_limit_gb or 24),
+                    min=1,
+                    max=256,
+                    step=1,
+                    id="hf-vram-limit",
+                    options=lcars.NumberInputOptions(
+                        precision=0,
+                        suffix=" GB",
+                        required=True,
+                    ),
+                    hint=(
+                        "A first-pass fit comparison against known model weight bytes. It is "
+                        "guidance, not a guarantee of training memory use."
+                    ),
+                )
+                fit_filter = lcars.select(
+                    "Model VRAM Fit",
+                    HF_FIT_FILTER_OPTIONS,
+                    value="any",
+                    id="hf-fit-filter",
+                    hint=(
+                        "Keep every model, only models with known size, or only weights within "
+                        "the stated VRAM budget. Dataset rows report data size instead."
+                    ),
+                )
             if _is_active_action("hf-filter-results"):
                 _set_widget_value("hf-query-mode", HF_QUERY_MODE_OPTIONS[0])
                 _hf_search_action(
@@ -3320,11 +3579,18 @@ def _hub_page() -> None:
                     fit_filter=fit_filter,
                     vram_limit=vram_limit,
                 )
+                lcars.update("hf-filter-popup", open=False)
 
 
 def _content_page() -> None:
     rows, total_text, total_bytes = STATE.hf.cache_rows()
-    with lcars.page("Content", id="content", layout="grid", fillers=False):
+    with lcars.page(
+        "Content",
+        id="content",
+        layout="grid",
+        fillers=False,
+        sizing="fill",
+    ):
         with lcars.data_panel(
             "Transfer Queue",
             color="golden-tanoi",
@@ -3445,7 +3711,13 @@ def _content_page() -> None:
 
 
 def _ollama_page() -> None:
-    with lcars.page("Ollama", id="ollama", layout="grid", fillers=False):
+    with lcars.page(
+        "Ollama",
+        id="ollama",
+        layout="grid",
+        fillers=False,
+        sizing="content",
+    ):
         with lcars.data_panel(
             "Axolotl Source Gate",
             color="pale-canary",
@@ -3726,9 +3998,7 @@ def _hf_result_table_options() -> lcars.TableOptions:
             f"{error_count} unavailable after retry."
         )
     elif visible_results:
-        metadata_message = (
-            f"Exact metadata ready for all {len(visible_results)} results."
-        )
+        metadata_message = f"Exact metadata ready for all {len(visible_results)} results."
     else:
         metadata_message = "Run a Hub search or inspect an owner/repository id to begin."
     sort_key = (
@@ -3816,6 +4086,7 @@ def _hf_result_table_options() -> lcars.TableOptions:
         sticky_header=True,
         density="compact",
         data_mode="server",
+        sort_cycle="two-state",
         emit_state_changes=True,
         row_click_select=True,
         interaction=lcars.InteractionOptions(action_id=HF_RESULTS_TABLE_ID),
@@ -4267,13 +4538,10 @@ def _handle_hf_table_action() -> None:
                 if direction in {"asc", "desc"}:
                     _hf_sort_action(sort_key, descending=direction == "desc")
             elif isinstance(sort_items, list):
-                # TanStack's third click clears its client sort. This table is
-                # server-owned, so keep header sorting two-state instead of
-                # leaving an arrowless client state over still-sorted rows.
-                _hf_sort_action(
-                    STATE.hf.local_sort,
-                    descending=not STATE.hf.local_sort_desc,
-                )
+                # LCARS 4.4.1 keeps server tables two-state. A cleared or malformed
+                # sort is therefore stale client state, not a request to reverse the
+                # server order; stream the canonical options back unchanged.
+                _update_hf_widgets()
             return
 
         if kind == "page":
@@ -4565,9 +4833,7 @@ def _lora_hf_dataset_format_options() -> list[lcars.SelectOption]:
 
 def _infer_lora_hf_dataset_format(cfg: dict[str, Any]) -> str:
     dataset_type = str(_config_path_value(cfg, "datasets.0.type") or "").casefold()
-    messages_field = str(
-        _config_path_value(cfg, "datasets.0.field_messages") or ""
-    ).casefold()
+    messages_field = str(_config_path_value(cfg, "datasets.0.field_messages") or "").casefold()
     if dataset_type == "completion":
         return "plain-text"
     if dataset_type == "alpaca":
@@ -4692,9 +4958,7 @@ def _lora_dataset_download_rows(
                 "Size": str(job.get("Estimate") or ""),
                 "Revision": str(job.get("Revision") or ""),
                 "Cache path": str(job.get("Local Path") or ""),
-                "What to do": _lora_dataset_job_guidance(
-                    str(job.get("Status") or "queued")
-                ),
+                "What to do": _lora_dataset_job_guidance(str(job.get("Status") or "queued")),
             }
         )
     if not rows:
@@ -4725,9 +4989,7 @@ def _lora_dataset_cache_notice(
     ready_rows: list[dict[str, str]],
 ) -> str:
     incomplete = [
-        row
-        for row in cache_rows
-        if str(row.get("Status") or "").strip().upper() == "INCOMPLETE"
+        row for row in cache_rows if str(row.get("Status") or "").strip().upper() == "INCOMPLETE"
     ]
     if incomplete:
         names = ", ".join(str(row.get("Repo") or "unknown") for row in incomplete[:3])
@@ -4801,9 +5063,7 @@ def _lora_journey_rows(
         },
         {
             "Step": "2 · Data",
-            "Status": (
-                "READY" if _lora_dataset_trainable(cfg, dataset) else "NEEDS EXAMPLES"
-            ),
+            "Status": ("READY" if _lora_dataset_trainable(cfg, dataset) else "NEEDS EXAMPLES"),
             "What happens": "Write and validate the ideal conversations to imitate",
             "Page": "?page=lora-data",
         },
@@ -4955,10 +5215,7 @@ def _lora_training_brief_rows(
 
 
 def _lora_dataset_issue_rows(report: DatasetReport) -> list[dict[str, str]]:
-    rows = [
-        {"Level": "ERROR", "Detail": detail}
-        for detail in report.errors
-    ]
+    rows = [{"Level": "ERROR", "Detail": detail} for detail in report.errors]
     rows.extend({"Level": "ADVICE", "Detail": detail} for detail in report.warnings)
     if not rows:
         rows.append(
@@ -5121,11 +5378,7 @@ def _render_field(spec: FieldSpec, cfg: dict[str, Any]) -> Any:
     value = STATE.config_store.control_value(spec, cfg)
     label = _field_label(spec)
     help_text = _field_help(spec)
-    hint_text = (
-        help_text
-        if spec.key in CONFIG_FIELD_HINTS or lora_tuning_hint(spec.key)
-        else None
-    )
+    hint_text = help_text if spec.key in CONFIG_FIELD_HINTS or lora_tuning_hint(spec.key) else None
     if spec.kind in {"text", "csv_list", "json"}:
         # force: the active YAML owns config values, so a rebuilt manifest must not
         # keep showing what the previous build seeded.
@@ -5282,14 +5535,8 @@ def _field_help(spec: FieldSpec) -> str:
     if specific:
         return f"{specific} Axolotl key: {spec.key}."
     expected = f" Expected value: {spec.placeholder}." if spec.placeholder else ""
-    optional = (
-        " Leave it unset unless this run specifically needs it."
-        if spec.optional
-        else ""
-    )
-    return (
-        f"Axolotl key: {spec.key}. Part of {spec.group}.{expected}{optional}"
-    )
+    optional = " Leave it unset unless this run specifically needs it." if spec.optional else ""
+    return f"Axolotl key: {spec.key}. Part of {spec.group}.{expected}{optional}"
 
 
 def _field_label(spec: FieldSpec) -> str:
@@ -5666,6 +5913,191 @@ def _stop_axolotl_action() -> None:
     _update_workflow_widgets()
 
 
+def _current_lora_dataset_import() -> _PendingDatasetImport | None:
+    """Return the staged normalized dataset, expiring it without retaining bytes."""
+
+    with STATE.pending_lora_dataset_lock:
+        item = STATE.pending_lora_dataset
+        if item is not None and item.created_at < time.time() - LORA_DATASET_IMPORT_TTL_SECONDS:
+            STATE.pending_lora_dataset = None
+            return None
+        return item
+
+
+def _lora_dataset_import_advice(dataset: DatasetImport | None) -> str:
+    if dataset is None:
+        return "Upload a JSON or JSONL dataset to run the checker."
+    if dataset.report.warnings:
+        return "Checker advice: " + " • ".join(dataset.report.warnings)
+    return "No structural warnings. Review the examples, then save the normalized JSONL copy."
+
+
+def _lora_dataset_import_preview_rows(
+    dataset: DatasetImport | None,
+) -> list[dict[str, Any]]:
+    if dataset is None:
+        return [
+            {
+                "Example": 0,
+                "Input": "No checked dataset is staged.",
+                "Ideal output": "",
+                "Messages": 0,
+            }
+        ]
+    return [dict(row) for row in dataset.preview_rows]
+
+
+def _update_lora_dataset_import_widgets(dataset: DatasetImport) -> None:
+    """Populate the native preview window after request-scoped upload parsing."""
+
+    example_count = dataset.report.example_count or 0
+    warnings = bool(dataset.report.warnings)
+    lcars.update(
+        "lora-data-file-loader-status",
+        value=dataset.source_name,
+        status="warn" if warnings else "ok",
+        options=lcars.MetricOptions(
+            secondary_value=(f"{dataset.detected_format} · {example_count} examples")
+        ).model_dump(mode="json"),
+    )
+    lcars.update("lora-data-review-upload", disabled=False)
+    lcars.update("lora-dataset-preview-source", content=dataset.source_name)
+    lcars.update(
+        "lora-dataset-preview-format",
+        value=dataset.detected_format,
+        status="ok",
+    )
+    lcars.update(
+        "lora-dataset-preview-examples",
+        value=str(example_count),
+        status="ok",
+    )
+    lcars.update(
+        "lora-dataset-preview-messages",
+        value=str(dataset.report.message_count),
+        status="ok",
+    )
+    lcars.update(
+        "lora-dataset-preview-advice",
+        message=_lora_dataset_import_advice(dataset),
+        severity="yellow" if warnings else "success",
+    )
+    lcars.update(
+        "lora-dataset-preview-table",
+        **_table_payload(
+            _lora_dataset_import_preview_rows(dataset),
+            numeric_columns={"Example", "Messages"},
+        ),
+    )
+    lcars.update(
+        "lora-dataset-import-filename",
+        value=dataset.suggested_filename,
+    )
+    lcars.update("lora-dataset-import-form", disabled=False)
+    lcars.update(LORA_DATASET_PREVIEW_POPUP_ID, open=True)
+
+
+def _reset_lora_dataset_import_widgets(
+    *,
+    status: str = "NONE STAGED",
+    detail: str = "Upload a JSON or JSONL file to check it.",
+) -> None:
+    lcars.update(
+        "lora-data-file-loader-status",
+        value=status,
+        status="warn" if status == "NONE STAGED" else "crit",
+        options=lcars.MetricOptions(
+            secondary_value=detail,
+        ).model_dump(mode="json"),
+    )
+    lcars.update("lora-data-review-upload", disabled=True)
+    lcars.update("lora-dataset-import-form", disabled=True)
+    lcars.update(LORA_DATASET_PREVIEW_POPUP_ID, open=False)
+
+
+def _stage_lora_dataset_import(
+    uploaded: lcars.UploadedFile,
+) -> _PendingDatasetImport | None:
+    """Consume a native LCARS upload and retain only its normalized representation."""
+
+    try:
+        dataset = parse_json_dataset(uploaded.name, uploaded.read())
+    except Exception as exc:
+        with STATE.pending_lora_dataset_lock:
+            STATE.pending_lora_dataset = None
+        _reset_lora_dataset_import_widgets(
+            status="CHECK FAILED",
+            detail=str(exc),
+        )
+        lcars.notify(
+            str(exc),
+            level="error",
+            title="Dataset not staged",
+        )
+        return None
+
+    item = _PendingDatasetImport(dataset=dataset, created_at=time.time())
+    with STATE.pending_lora_dataset_lock:
+        STATE.pending_lora_dataset = item
+    _update_lora_dataset_import_widgets(dataset)
+    lcars.notify(
+        (f"{dataset.detected_format}; validated {dataset.report.example_count or 0} example(s)."),
+        level="warning" if dataset.report.warnings else "success",
+        title="Dataset checked",
+        duration_ms=8_000,
+    )
+    return item
+
+
+def _apply_lora_dataset_import(filename: str) -> _PendingDatasetImport | None:
+    """Claim and persist the staged normalized dataset exactly once."""
+
+    item = _current_lora_dataset_import()
+    if item is None:
+        _reset_lora_dataset_import_widgets()
+        lcars.notify(
+            "That checked dataset expired. Upload the file again.",
+            level="warning",
+            title="Dataset not applied",
+        )
+        return None
+    if STATE.workflow.is_active:
+        lcars.notify(
+            "Stop the active workflow before changing its dataset.",
+            level="error",
+            title="Config locked",
+        )
+        return item
+
+    with STATE.pending_lora_dataset_lock:
+        if STATE.pending_lora_dataset is not item:
+            return STATE.pending_lora_dataset
+        STATE.pending_lora_dataset = None
+
+    if not _lora_save_dataset_action(
+        filename.strip(),
+        item.dataset.jsonl_text,
+        notify=False,
+    ):
+        with STATE.pending_lora_dataset_lock:
+            if STATE.pending_lora_dataset is None:
+                STATE.pending_lora_dataset = item
+        lcars.update(LORA_DATASET_PREVIEW_POPUP_ID, open=True)
+        return item
+
+    _reset_lora_dataset_import_widgets()
+    lcars.notify(
+        (
+            f"Saved {item.dataset.report.example_count or 0} validated example(s) as "
+            f"./data/{filename.strip()} and made it the active training dataset."
+        ),
+        level="success",
+        title="Dataset ready",
+        duration_ms=10_000,
+    )
+    return None
+
+
 def _lora_use_downloaded_dataset_action(
     repo_id: str,
     format_key: str,
@@ -5727,9 +6159,8 @@ def _lora_setup_action(
         current_cfg = STATE.config_store.load()
         current_base_model = str(current_cfg.get("base_model") or "").strip()
         effective_preset_key = preset_key
-        if (
-            base_model.strip() != current_base_model
-            and preset_key == infer_lora_preset(current_cfg)
+        if base_model.strip() != current_base_model and preset_key == infer_lora_preset(
+            current_cfg
         ):
             # A model change should inherit that model's safe default unless the
             # operator also made an explicit recipe change in the same form.
@@ -5765,9 +6196,13 @@ def _lora_setup_action(
         _set_widget_value("lora-data-filename", f"{slug}.jsonl")
         _set_widget_value("lora-test-model-name", f"{slug}-lora")
         current_editor = _widget_value("lora-data-editor")
-        if created or not current_editor.strip() or _lora_editor_is_generated_template(
-            current_editor,
-            project_name,
+        if (
+            created
+            or not current_editor.strip()
+            or _lora_editor_is_generated_template(
+                current_editor,
+                project_name,
+            )
         ):
             _set_widget_value(
                 "lora-data-editor",
@@ -5801,18 +6236,12 @@ def _lora_save_dataset_action(
         return False
     try:
         cfg = _load_config_or_empty()
-        model_template = get_lora_model_template(
-            str(cfg.get("base_model") or "")
-        )
+        model_template = get_lora_model_template(str(cfg.get("base_model") or ""))
         imported = parse_json_dataset(
             filename.strip(),
             editor_text.encode("utf-8"),
         )
-        dataset_type = (
-            "completion"
-            if imported.format_key == "plain-text"
-            else "chat_template"
-        )
+        dataset_type = "completion" if imported.format_key == "plain-text" else "chat_template"
         target, draft_report = save_jsonl_dataset(
             PROJECT_ROOT,
             filename.strip(),
@@ -5845,15 +6274,12 @@ def _lora_save_dataset_action(
                 f"{draft_report.placeholder_count} placeholder(s) before training."
             )
         elif notify:
-            lcars.notify(
-                f"Dataset saved and configured: {draft_report.example_count} example(s)."
-            )
+            lcars.notify(f"Dataset saved and configured: {draft_report.example_count} example(s).")
         return True
     except Exception as exc:
         if notify:
             lcars.notify(
-                "Dataset saved and configured, but the status panels could not refresh: "
-                f"{exc}",
+                f"Dataset saved and configured, but the status panels could not refresh: {exc}",
                 level="error",
             )
         return True
@@ -5917,9 +6343,7 @@ def _lora_validate_dataset_action() -> None:
     report = inspect_configured_dataset(PROJECT_ROOT, _load_config_or_empty())
     _update_lora_widgets()
     if report.ready:
-        lcars.notify(
-            "Dataset structure is ready. Quality still depends on the examples you wrote."
-        )
+        lcars.notify("Dataset structure is ready. Quality still depends on the examples you wrote.")
     else:
         detail = (
             report.errors[0]
@@ -6066,8 +6490,7 @@ def _lora_editor_is_generated_template(text: str, project_name: str) -> bool:
         display_name = project_name.strip() or "The Assistant"
     candidate = text.strip()
     return any(
-        candidate == starter_dataset_template(goal, display_name).strip()
-        for goal in LORA_GOALS
+        candidate == starter_dataset_template(goal, display_name).strip() for goal in LORA_GOALS
     )
 
 
@@ -6537,8 +6960,7 @@ def _update_config_widgets() -> None:
         "lora-preset",
         value=active_preset,
         options=[
-            option.model_dump(mode="json")
-            for option in _lora_preset_options(recommended_preset)
+            option.model_dump(mode="json") for option in _lora_preset_options(recommended_preset)
         ],
     )
     try:
@@ -6624,9 +7046,9 @@ def _update_lora_widgets() -> None:
             if _lora_dataset_trainable(cfg, dataset)
             else ("crit" if dataset.errors else "warn")
         ),
-        options=lcars.MetricOptions(
-            secondary_value=dataset.source or "No source"
-        ).model_dump(mode="json"),
+        options=lcars.MetricOptions(secondary_value=dataset.source or "No source").model_dump(
+            mode="json"
+        ),
     )
     lcars.update(
         "lora-data-active-source",
@@ -6650,9 +7072,7 @@ def _update_lora_widgets() -> None:
         status="ok" if _lora_dataset_trainable(cfg, dataset) else "warn",
         options=lcars.MetricOptions(
             secondary_value=(
-                "remote"
-                if dataset.example_count is None
-                else f"{dataset.example_count} examples"
+                "remote" if dataset.example_count is None else f"{dataset.example_count} examples"
             )
         ).model_dump(mode="json"),
     )
@@ -6725,9 +7145,7 @@ def _update_lora_ollama_selects(
     preferred_tuned: str = "",
 ) -> None:
     names = [model.name for model in STATE.ollama.models]
-    serialized = [
-        option.model_dump(mode="json") for option in _lora_ollama_select_options(names)
-    ]
+    serialized = [option.model_dump(mode="json") for option in _lora_ollama_select_options(names)]
     preferences = {
         "lora-test-base-model": preferred_base,
         "lora-test-compare-base": preferred_base,
@@ -6867,8 +7285,7 @@ def _update_lora_downloaded_dataset_widgets(
         _config_path_value(_load_config_or_empty(), "datasets.0.path") or ""
     ).strip()
     options = [
-        option.model_dump(mode="json")
-        for option in _lora_downloaded_dataset_options(ready_rows)
+        option.model_dump(mode="json") for option in _lora_downloaded_dataset_options(ready_rows)
     ]
     lcars.update(
         "lora-downloaded-dataset-table",
@@ -6885,11 +7302,8 @@ def _update_lora_downloaded_dataset_widgets(
     lcars.update("lora-downloaded-dataset-form", disabled=not bool(ready_rows))
     lcars.update(
         "lora-no-downloaded-datasets",
-        content=_lora_dataset_cache_notice(rows, ready_rows),
-        visible=(
-            not bool(ready_rows)
-            or any(row.get("Status") == "INCOMPLETE" for row in rows)
-        ),
+        message=_lora_dataset_cache_notice(rows, ready_rows),
+        visible=(not bool(ready_rows) or any(row.get("Status") == "INCOMPLETE" for row in rows)),
     )
 
 
@@ -6939,6 +7353,20 @@ def _hf_result_for(repo_id: str) -> Any:
     return None
 
 
+def _is_request_scoped_upload_payload(value: Any) -> bool:
+    """Identify native file payloads whose bytes must never enter session state."""
+
+    if not isinstance(value, dict):
+        return False
+    files = value.get("files")
+    if not isinstance(files, list):
+        return False
+    return any(
+        isinstance(item, dict) and isinstance(item.get("data"), (bytes, bytearray, memoryview))
+        for item in files
+    )
+
+
 def create_lcars_app(
     ui_fn: Callable[[], None], *, live_fn: Callable[[], None] | None = None
 ) -> FastAPI:
@@ -6976,9 +7404,10 @@ def create_lcars_app(
             session_state = get_session_state(session_id)
             child_ids = form_children_by_action.get(action_id)
             if child_ids is None:
-                for key, item_value in value.items():
-                    if isinstance(key, str):
-                        session_state[key] = item_value
+                if not _is_request_scoped_upload_payload(value):
+                    for key, item_value in value.items():
+                        if isinstance(key, str):
+                            session_state[key] = item_value
             else:
                 for child_id in child_ids:
                     if child_id in value:
@@ -7012,7 +7441,6 @@ def create_lcars_app(
 
         app.state._live_coro_factory = _live_loop
 
-    _install_lora_dataset_loader(app)
     _install_raw_editor(app)
     return app
 
@@ -7083,9 +7511,7 @@ def _install_internal_navigation(app: FastAPI) -> None:
         page = original_root()
         if not isinstance(page, str) or "</body>" not in page:
             return page
-        script = (
-            '<script type="module" src="/lcars/internal-navigation.js"></script>'
-        )
+        script = '<script type="module" src="/lcars/internal-navigation.js"></script>'
         return page.replace("</body>", f"{script}\n</body>", 1)
 
     enhanced_root = app.router.routes.pop()
@@ -7105,288 +7531,6 @@ def _mark_manifest_stale(app: FastAPI) -> None:
     """Flag the manifest for rebuild before the next client reads it."""
 
     app.state._manifest_stale = True
-
-
-def _install_lora_dataset_loader(app: FastAPI) -> None:
-    """Install the scoped JSON/JSONL inspect-preview-apply workflow."""
-
-    pending: dict[str, _PendingDatasetImport] = {}
-    pending_lock = threading.Lock()
-
-    def purge_expired() -> None:
-        cutoff = time.time() - LORA_DATASET_IMPORT_TTL_SECONDS
-        expired = [
-            token
-            for token, item in pending.items()
-            if item.created_at < cutoff
-        ]
-        for token in expired:
-            pending.pop(token, None)
-        while len(pending) >= LORA_DATASET_IMPORT_MAX_PENDING:
-            oldest = min(pending, key=lambda token: pending[token].created_at)
-            pending.pop(oldest, None)
-
-    @app.get(
-        "/lora/data/import",
-        response_class=HTMLResponse,
-        include_in_schema=False,
-    )
-    def lora_dataset_import_get() -> str:
-        return _lora_dataset_import_html()
-
-    _move_last_route_before_spa(app)
-
-    @app.post(
-        "/lora/data/import/preview",
-        response_class=HTMLResponse,
-        include_in_schema=False,
-    )
-    async def lora_dataset_import_preview(
-        dataset_file: UploadFile = File(...),
-    ) -> str:
-        filename = dataset_file.filename or ""
-        try:
-            content = await dataset_file.read(LORA_DATASET_UPLOAD_MAX_BYTES + 1)
-        finally:
-            await dataset_file.close()
-        if len(content) > LORA_DATASET_UPLOAD_MAX_BYTES:
-            return _lora_dataset_import_html(
-                error=(
-                    "The selected file is larger than 64MB. Use HF Hub for large datasets "
-                    "so they can be cached and streamed safely."
-                )
-            )
-        try:
-            dataset = parse_json_dataset(filename, content)
-        except Exception as exc:
-            return _lora_dataset_import_html(error=str(exc))
-
-        token = secrets.token_urlsafe(24)
-        with pending_lock:
-            purge_expired()
-            pending[token] = _PendingDatasetImport(
-                dataset=dataset,
-                created_at=time.time(),
-            )
-        return _lora_dataset_import_html(dataset=dataset, token=token)
-
-    _move_last_route_before_spa(app)
-
-    @app.post(
-        "/lora/data/import/apply",
-        response_class=HTMLResponse,
-        include_in_schema=False,
-    )
-    def lora_dataset_import_apply(
-        token: str = Form(...),
-        filename: str = Form(...),
-    ) -> str:
-        with pending_lock:
-            purge_expired()
-            # Claim the preview while applying it so a double-submit cannot write
-            # the same normalized dataset twice or replace its backup unexpectedly.
-            item = pending.pop(token, None)
-        if item is None:
-            return _lora_dataset_import_html(
-                error=(
-                    "That checked preview expired or was already used. "
-                    "Choose the dataset file again."
-                )
-            )
-        dataset = item.dataset
-        if STATE.workflow.is_active:
-            with pending_lock:
-                purge_expired()
-                pending[token] = item
-            return _lora_dataset_import_html(
-                dataset=dataset,
-                token=token,
-                error=(
-                    "The active config is locked while its workflow is running. "
-                    "Stop the workflow before changing its dataset."
-                ),
-            )
-        try:
-            dataset_type = (
-                "completion"
-                if dataset.format_key == "plain-text"
-                else "chat_template"
-            )
-            cfg = STATE.config_store.load()
-            model_template = get_lora_model_template(str(cfg.get("base_model") or ""))
-            config_updates = local_dataset_config_updates(
-                filename.strip(),
-                dataset.format_key,
-                use_top_level_chat_template=model_template is not None,
-            )
-            target, saved_report = save_jsonl_dataset(
-                PROJECT_ROOT,
-                filename.strip(),
-                dataset.jsonl_text,
-                dataset_type=dataset_type,
-            )
-            STATE.config_store.apply_updates(config_updates)
-            _remember_lora_dataset_editor(target.name, dataset.jsonl_text)
-        except Exception as exc:
-            with pending_lock:
-                purge_expired()
-                pending[token] = item
-            return _lora_dataset_import_html(
-                dataset=dataset,
-                token=token,
-                error=f"Dataset was not applied: {exc}",
-            )
-        preflight_warning = ""
-        try:
-            STATE.refresh_preflight()
-        except Exception as exc:
-            preflight_warning = (
-                f" The dataset is active, but the preflight display could not refresh: {exc}."
-            )
-        _mark_manifest_stale(app)
-        return _lora_dataset_import_html(
-            success=(
-                f"Loaded {saved_report.example_count or 0} validated example(s) as "
-                f"./data/{target.name}. The active LoRA config now uses this dataset."
-                f"{preflight_warning}"
-            )
-        )
-
-    _move_last_route_before_spa(app)
-
-
-def _lora_dataset_import_html(
-    *,
-    dataset: DatasetImport | None = None,
-    token: str = "",
-    error: str = "",
-    success: str = "",
-) -> str:
-    error_html = (
-        f"<section class='notice error'><h2>NOT LOADED</h2><p>{html.escape(error)}</p></section>"
-        if error
-        else ""
-    )
-    success_html = (
-        "<section class='notice success'><h2>DATASET LOADED</h2>"
-        f"<p>{html.escape(success)}</p>"
-        "<p><a class='action secondary' href='/?page=lora-data'>Return to LoRA Data</a></p>"
-        "</section>"
-        if success
-        else ""
-    )
-    preview_html = _lora_dataset_import_preview_html(dataset, token) if dataset else ""
-    upload_hidden = " hidden" if success else ""
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LoRA Dataset Loader</title>
-  <style>
-    :root {{ color-scheme:dark; --bg:#05070d; --panel:#111827; --line:#c9a7ff; --gold:#ffbd66; --blue:#78c7ff; --ok:#7dffb2; --bad:#ff7e8b; --text:#f7f1da; --muted:#a9b5c8; }}
-    * {{ box-sizing:border-box; }}
-    body {{ margin:0; background:var(--bg); color:var(--text); font:15px/1.48 system-ui, sans-serif; }}
-    header {{ display:flex; align-items:center; justify-content:space-between; gap:16px; padding:16px 22px; border-bottom:5px solid var(--line); }}
-    h1,h2 {{ margin:0; color:var(--line); letter-spacing:.03em; }}
-    h1 {{ font-size:clamp(22px,4vw,34px); }}
-    h2 {{ font-size:18px; margin-bottom:10px; }}
-    a {{ color:var(--blue); }}
-    main {{ width:min(1180px,100%); margin:auto; padding:20px; display:grid; gap:18px; }}
-    section {{ background:var(--panel); border-left:8px solid var(--line); border-radius:5px; padding:18px; }}
-    .lede {{ color:var(--muted); max-width:78ch; }}
-    .notice.error {{ border-color:var(--bad); }}
-    .notice.error h2 {{ color:var(--bad); }}
-    .notice.success {{ border-color:var(--ok); }}
-    .notice.success h2 {{ color:var(--ok); }}
-    form {{ display:grid; gap:14px; }}
-    label {{ color:var(--gold); font-weight:800; }}
-    input[type=file],input[type=text] {{ width:100%; border:2px solid #57657a; border-radius:4px; background:#050911; color:var(--text); padding:12px; }}
-    .action,button {{ display:inline-block; width:max-content; border:0; border-radius:4px; background:var(--line); color:#120820; padding:11px 17px; font-weight:900; text-decoration:none; cursor:pointer; }}
-    .secondary {{ background:var(--blue); color:#03111c; }}
-    .facts {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin:14px 0; }}
-    .fact {{ background:#080d17; border:1px solid #354158; border-radius:4px; padding:11px; }}
-    .fact strong {{ display:block; color:var(--gold); }}
-    table {{ width:100%; border-collapse:collapse; font-size:14px; }}
-    th,td {{ text-align:left; vertical-align:top; padding:9px; border-bottom:1px solid #354158; overflow-wrap:anywhere; }}
-    th {{ color:var(--gold); }}
-    ul {{ margin-bottom:0; }}
-    code {{ color:var(--blue); }}
-    .scroll {{ overflow:auto; }}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>LoRA JSON / JSONL Loader</h1>
-    <a href="/?page=lora-data">Return to LoRA Data</a>
-  </header>
-  <main>
-    {error_html}
-    {success_html}
-    <section{upload_hidden}>
-      <h2>1 · Choose a dataset file</h2>
-      <p class="lede">The loader accepts UTF-8 JSON and JSONL up to 64MB. It detects OpenAI messages, ShareGPT conversations, Alpaca rows, common prompt/response pairs, and plain text. Invalid data is never written to the project.</p>
-      <form action="/lora/data/import/preview" method="post" enctype="multipart/form-data">
-        <label for="dataset_file">JSON or JSONL dataset</label>
-        <input id="dataset_file" name="dataset_file" type="file" accept=".json,.jsonl,application/json,application/x-ndjson" required>
-        <button type="submit">Inspect File</button>
-      </form>
-    </section>
-    {preview_html}
-  </main>
-</body>
-</html>"""
-
-
-def _lora_dataset_import_preview_html(
-    dataset: DatasetImport,
-    token: str,
-) -> str:
-    warnings = "".join(
-        f"<li>{html.escape(warning)}</li>"
-        for warning in dataset.report.warnings
-    )
-    warning_html = (
-        f"<h2>Checker advice</h2><ul>{warnings}</ul>"
-        if warnings
-        else "<h2>Checker result</h2><p>No structural warnings.</p>"
-    )
-    rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(str(row.get('Example') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('Input') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('Ideal output') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('Messages') or ''))}</td>"
-        "</tr>"
-        for row in dataset.preview_rows
-    )
-    return (
-        "<section>"
-        "<h2>2 · Checked preview</h2>"
-        "<div class='facts'>"
-        f"<div class='fact'><strong>Source</strong>{html.escape(dataset.source_name)}</div>"
-        f"<div class='fact'><strong>Detected</strong>{html.escape(dataset.detected_format)}</div>"
-        f"<div class='fact'><strong>Examples</strong>{dataset.report.example_count or 0}</div>"
-        f"<div class='fact'><strong>Messages</strong>{dataset.report.message_count}</div>"
-        "</div>"
-        f"{warning_html}"
-        "<div class='scroll'><table><thead><tr><th>#</th><th>Input</th>"
-        "<th>Ideal output</th><th>Messages</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></div>"
-        "</section>"
-        "<section>"
-        "<h2>3 · Use the checked dataset</h2>"
-        "<p class='lede'>The normalized copy is saved inside <code>./data</code>; "
-        "the original upload is not modified. The active LoRA YAML is updated only now.</p>"
-        "<form action='/lora/data/import/apply' method='post'>"
-        f"<input name='token' type='hidden' value='{html.escape(token)}'>"
-        "<label for='filename'>Project dataset filename</label>"
-        f"<input id='filename' name='filename' type='text' value='{html.escape(dataset.suggested_filename)}' "
-        "pattern='[A-Za-z0-9][A-Za-z0-9._-]{0,126}\\.jsonl' required>"
-        "<button type='submit'>Use This Dataset</button>"
-        "</form>"
-        "</section>"
-    )
 
 
 def _install_raw_editor(app: FastAPI) -> None:

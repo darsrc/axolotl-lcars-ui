@@ -85,13 +85,14 @@ The first five navigation items form one guided workflow:
      reuses the downloaded cache. Dataset split slices such as `train[:10%]` and named subsets are
      supported. If a transfer left only a partial cache entry, the page labels it **INCOMPLETE**,
      explains that its snapshot cannot be used for training, and directs you to download it again.
-   - **Option B · Load JSON / JSONL File** opens a file chooser rather than asking for a dataset
-     path. The loader checks UTF-8 and JSON/JSONL syntax, validates every record, detects OpenAI
-     `messages`, ShareGPT `conversations`, Alpaca rows, common prompt/response pairs, or a complete
-     `text` field, and shows a bounded preview before anything is written. Chat-shaped inputs are
-     normalized to OpenAI messages. Accepting the preview saves a project-local JSONL copy and
-     updates the active YAML without modifying the original file. Browser imports are limited to
-     64MB; use HF Hub for larger datasets.
+   - **Option B · Load JSON / JSONL File** provides a native LCARS drag/drop uploader rather than
+     asking for a dataset path. It checks UTF-8 and JSON/JSONL syntax, validates every record,
+     detects OpenAI `messages`, ShareGPT `conversations`, Alpaca rows, common prompt/response
+     pairs, or a complete `text` field, then opens a movable checked-preview window before anything
+     is written. Chat-shaped inputs are normalized to OpenAI messages. Upload bytes exist only for
+     the validation request; the UI stages the normalized preview for up to 15 minutes. Accepting
+     the preview saves a project-local JSONL copy and updates the active YAML without modifying the
+     original file. Native imports are limited to 25MB; use HF Hub for larger datasets.
    - **Option C · Build Examples In The Studio** lets you enter a user prompt and exact ideal
      answer in a normal form; **Add & Save Local Example** generates chat JSONL automatically. The
      first form entry replaces the untouched `EDIT ME` starter template and later entries append
@@ -141,6 +142,13 @@ checkout into the venv in editable mode after installing requirements:
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
 ```
+
+Live telemetry, workflow, console, resource, Content, and HF Hub pages use the adaptive
+screen-filling deck. Long setup and editor pages use LCARS' content-sizing mode so short panels do
+not stretch simply to consume the viewport. HF refinement and checked dataset previews use
+movable/resizable windows; notifications use the dockable severity-aware center; and the
+renderer-owned Options page stores theme, motion, sound, uppercase, and body-type preferences
+locally in the browser.
 
 ## Workflow Page
 

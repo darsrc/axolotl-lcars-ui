@@ -31,9 +31,10 @@ python3.11 -m venv .venv
 
 `requirements.txt` installs the latest LCARS WebUI `main` branch directly from
 [darsrc/LCARS-WebUI](https://github.com/darsrc/LCARS-WebUI). New installs therefore follow current
-upstream functionality, including contextual tooltips/interactive popovers and the scrollable
-navigation rail. To refresh an existing environment, reinstall the requirement; for local
-`lcars-ui` development, install your own checkout into the venv in editable mode:
+upstream functionality, including adaptive screen-filling layouts, bounded native file uploads,
+movable popups and notifications, and the local Options page. To refresh an existing environment,
+reinstall the requirement; for local `lcars-ui` development, install your own checkout into the
+venv in editable mode:
 
 ```bash
 uv pip install -e /path/to/LCARS-WebUI/lcars-ui --reinstall-package lcars-ui
@@ -79,12 +80,14 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   Qwen 3.5 2B/4B/9B, Qwen 3.6 27B/35B-A3B, and Gemma 4 E2B/E4B with the correct chat format,
   text-backbone targets, and safe first recipe. Every beginner option explains its effect, and a
   current-value tuning guide says what to change, when, and why. The Data page offers three explicit
-  routes: select a completed Hugging Face dataset download and its common row shape; load, check,
-  normalize, and preview an existing JSON/JSONL file; or create a local chat dataset with a plain
-  conversation form. The latter saves JSONL without requiring users to write JSON; the collapsible
-  raw editor validates deliberate bulk edits, calls out unfinished placeholders, and keeps a backup
-  when a draft is overwritten. Interrupted Hugging Face dataset downloads remain visible as
-  incomplete, with a direct retry instruction, but cannot be selected for training.
+  routes: select a completed Hugging Face dataset download and its common row shape; drag/drop,
+  check, normalize, and preview an existing JSON/JSONL file inside a native LCARS window; or create
+  a local chat dataset with a plain conversation form. Upload bytes are request-scoped and only the
+  normalized preview is staged until it is accepted. The latter saves JSONL without requiring users
+  to write JSON; the collapsible raw editor validates deliberate bulk edits, calls out unfinished
+  placeholders, and keeps a backup when a draft is overwritten. Interrupted Hugging Face dataset
+  downloads remain visible as incomplete, with a direct retry instruction, but cannot be selected
+  for training.
 - Focused LoRA training gate and monitor with plain-language settings, preflight/data readiness,
   live process/GPU/RAM state, Axolotl logs, a one-click preflight-gated start, optional standalone
   preprocessing, safe stop controls, and automatic Safetensors adapter discovery.
@@ -112,24 +115,26 @@ The launcher traps `Ctrl+C` and asks the Python server to terminate cleanly.
   Axolotl's launcher command shape.
 - CPU, RAM, GPU, disk, top-process, GPU-process, and training-artifact storage telemetry in
   aligned overview/detail rows with compact GPU readouts and independent table scrolling.
-- Latest LCARS WebUI `main`: content-sized, viewport-aware mosaic layouts with edge-aware operator
-  arrangement, editable rows, columns and sections, stable panel grouping, dense-page filler
-  control, native sortable/filterable/pageable data tables, and an immersive typed node-graph
-  editor with groups, comments, reroutes, a searchable palette, and JSON interchange. Tables keep
-  stable selection, rich expandable details, linked/copyable cells, and inline actions; controls
-  and logs are searchable; high-impact Axolotl controls expose contextual help on hover/focus;
-  defaults and persisted preferences are validated and typed; and consequential process, download,
-  and cache actions require confirmation.
+- Latest LCARS WebUI `main`: adaptive screen-filling dashboards and intentional content-sized form
+  pages, responsive portrait/landscape recomposition, edge-aware operator arrangement, editable
+  persistent rows, columns and sections, native bounded file uploads, movable/resizable windows,
+  dockable notifications, and a local Options page. Native sortable/filterable/pageable tables use
+  controlled two-state server sorting; the immersive typed node-graph editor retains groups,
+  comments, reroutes, a searchable palette, and JSON interchange. Tables keep stable selection,
+  rich expandable details, linked/copyable cells, and inline actions; controls and logs are
+  searchable; high-impact Axolotl controls expose contextual help on hover/focus; and consequential
+  process, download, and cache actions require confirmation.
 - Hugging Face model/dataset search in a responsive master/detail workspace with a dominant
   repository table and a unified operations rail for atomic search/exact-repository queries,
   selected-repository state, and contextual actions. Advanced filters now live in an interactive
-  pinned popover, keeping the rail focused while retaining an atomic two-column filter workspace;
-  the rail stacks below results on compact screens. Search and repository-target types remain
+  movable/resizable window, keeping the rail and result table visible while retaining an atomic
+  two-column filter workspace; the rail stacks below results on compact screens. Search and
+  repository-target types remain
   independent; cross-type stale artifact filters are neutralized; typed sorting, local metadata
   filters, model VRAM/data-size fit, compatibility classification, stable row selection, automatic
-  metadata hydration for each visible result page, rich expandable metadata/file/lineage views,
-  in-place inspect/copy/queue/config actions; fine-tune lookup; and filtered `snapshot_download`
-  downloads
+  metadata hydration for the complete result snapshot, rich expandable metadata/file/lineage
+  views, in-place inspect/copy/queue/config actions; fine-tune lookup; and filtered
+  `snapshot_download` downloads
   into the standard HF cache. Transfer monitoring now lives beside cache operations on the
   Content page.
 - The workflow graph and control selections (search query, filters, sort, run action and args,

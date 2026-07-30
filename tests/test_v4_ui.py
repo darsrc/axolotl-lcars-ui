@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import unittest
-from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -64,11 +62,17 @@ class V44UiTests(unittest.TestCase):
         cls.widgets = _manifest_widgets(cls.manifest)
 
     def test_project_builds_with_lcars_v44(self) -> None:
-        self.assertEqual(lcars.__version__, "4.4.0")
+        version = tuple(int(part) for part in lcars.__version__.split(".")[:3])
+        self.assertGreaterEqual(version, (4, 4, 1))
         self.assertTrue(hasattr(lcars, "Hint"))
         self.assertTrue(callable(lcars.hint))
         self.assertTrue(callable(lcars.show_hint))
-        self.assertEqual(len(self.manifest.pages), 18)
+        self.assertTrue(callable(lcars.file_upload))
+        self.assertTrue(callable(lcars.popup))
+        self.assertEqual(len(self.manifest.pages), 19)
+        self.assertIn("lcars-options", self.manifest.pages)
+        self.assertEqual(self.manifest.pages["lora-data"].sizing, "content")
+        self.assertEqual(self.manifest.pages["hub"].sizing, "fill")
 
     def test_beginner_lora_studio_exposes_the_four_step_flow(self) -> None:
         self.assertEqual(
@@ -92,15 +96,10 @@ class V44UiTests(unittest.TestCase):
         )
         self.assertEqual(self.widgets["lora-preset"].type, "select")
         self.assertEqual(len(self.widgets["lora-preset"].options), 4)
-        self.assertTrue(
-            all(option.description for option in self.widgets["lora-preset"].options)
-        )
-        self.assertTrue(
-            all(option.description for option in self.widgets["lora-goal"].options)
-        )
+        self.assertTrue(all(option.description for option in self.widgets["lora-preset"].options))
+        self.assertTrue(all(option.description for option in self.widgets["lora-goal"].options))
         model_options = {
-            option.value: option.description
-            for option in self.widgets["lora-base-model"].options
+            option.value: option.description for option in self.widgets["lora-base-model"].options
         }
         for template in main.LORA_MODEL_TEMPLATES:
             with self.subTest(model=template.model_id):
@@ -118,8 +117,7 @@ class V44UiTests(unittest.TestCase):
             self.widgets["cfg-lora-r"].options.description.lower(),
         )
         adapter_options = {
-            option.value: option.description
-            for option in self.widgets["cfg-adapter"].options
+            option.value: option.description for option in self.widgets["cfg-adapter"].options
         }
         self.assertIn("gpu memory", adapter_options["qlora"].lower())
         data_form = self.widgets["lora-data-form"]
@@ -154,19 +152,20 @@ class V44UiTests(unittest.TestCase):
         )
         self.assertEqual(len(self.widgets["lora-hf-dataset-format"].options), 4)
         self.assertTrue(
-            all(
-                option.description
-                for option in self.widgets["lora-hf-dataset-format"].options
-            )
+            all(option.description for option in self.widgets["lora-hf-dataset-format"].options)
         )
         self.assertIn(
             "one dataset",
             self.widgets["lora-data-current-help"].content.lower(),
         )
-        self.assertIn(
-            "/lora/data/import",
-            self.widgets["lora-data-file-loader"].content,
-        )
+        uploader = self.widgets[main.LORA_DATASET_UPLOAD_ID]
+        self.assertEqual(uploader.type, "file_upload")
+        self.assertEqual(uploader.action_id, main.LORA_DATASET_UPLOAD_ACTION)
+        self.assertFalse(uploader.multiple)
+        self.assertEqual(uploader.max_files, 1)
+        self.assertEqual(uploader.max_bytes, main.LORA_DATASET_UPLOAD_MAX_BYTES)
+        self.assertIn(".json", uploader.accept)
+        self.assertIn(".jsonl", uploader.accept)
         self.assertEqual(
             len(self.widgets["lora-data-file-formats-table"].rows),
             4,
@@ -174,6 +173,23 @@ class V44UiTests(unittest.TestCase):
         self.assertIn(
             "nothing is written",
             self.widgets["lora-data-file-loader-note"].content.lower(),
+        )
+        self.assertIn(
+            "request-scoped",
+            self.widgets["lora-data-file-loader-note"].content.lower(),
+        )
+        preview = self.widgets[main.LORA_DATASET_PREVIEW_POPUP_ID]
+        self.assertEqual(preview.type, "popup")
+        self.assertFalse(preview.open)
+        self.assertTrue(preview.modal)
+        self.assertTrue(preview.draggable)
+        self.assertTrue(preview.resizable)
+        import_form = self.widgets["lora-dataset-import-form"]
+        self.assertIn(import_form, preview.children)
+        self.assertEqual(import_form.action_id, "lora-dataset-import-apply")
+        self.assertEqual(
+            {child.id for child in import_form.children},
+            {"lora-dataset-import-filename"},
         )
         self.assertIn(
             "TRAINING WILL READ",
@@ -257,9 +273,7 @@ class V44UiTests(unittest.TestCase):
             "Helpful Captain",
         )
 
-        self.assertTrue(
-            main._lora_editor_is_generated_template(template, "helpful-captain")
-        )
+        self.assertTrue(main._lora_editor_is_generated_template(template, "helpful-captain"))
         self.assertFalse(
             main._lora_editor_is_generated_template(
                 template.replace("[EDIT ME 1:", "My carefully edited answer:"),
@@ -319,90 +333,142 @@ class V44UiTests(unittest.TestCase):
             build_state.clear()
             build_state.update(original)
 
-    def test_json_dataset_route_previews_normalizes_and_applies_once(self) -> None:
-        app = main.FastAPI()
-        main._install_lora_dataset_loader(app)
-        routes = {
-            getattr(route, "path", ""): route.endpoint
-            for route in app.router.routes
-            if hasattr(route, "endpoint")
-        }
-        upload = main.UploadFile(
-            filename="captain data.json",
-            file=BytesIO(
-                json.dumps(
+    def test_native_json_dataset_upload_previews_normalizes_and_applies_once(self) -> None:
+        original_ctx = get_ctx()
+        original_pending = main.STATE.pending_lora_dataset
+        session_id = "native-dataset-upload"
+        content = json.dumps(
+            {
+                "records": [
                     {
-                        "records": [
+                        "conversations": [
+                            {"from": "human", "value": "Status?"},
                             {
-                                "conversations": [
-                                    {"from": "human", "value": "Status?"},
-                                    {
-                                        "from": "gpt",
-                                        "value": "All systems ready. <script>alert('x')</script>",
-                                    },
-                                ]
-                            }
+                                "from": "gpt",
+                                "value": "All systems ready. <script>alert('x')</script>",
+                            },
                         ]
                     }
-                ).encode()
-            ),
+                ]
+            }
+        ).encode()
+        uploaded = lcars.UploadedFile(
+            name="captain data.json",
+            size=len(content),
+            content_type="application/json",
+            data=content,
         )
-
-        preview = asyncio.run(
-            routes["/lora/data/import/preview"](dataset_file=upload)
-        )
-        self.assertIn("ShareGPT conversations", preview)
-        self.assertIn("All systems ready.", preview)
-        self.assertNotIn("<script>alert", preview)
-        self.assertIn("&lt;script&gt;", preview)
-        token_match = re.search(
-            r"name='token' type='hidden' value='([^']+)'",
-            preview,
-        )
-        self.assertIsNotNone(token_match)
-        token = token_match.group(1)
-
-        with (
-            TemporaryDirectory() as temp_dir,
-            patch.object(main, "PROJECT_ROOT", Path(temp_dir)),
-            patch.object(
-                main.STATE.config_store,
-                "load",
-                return_value={"base_model": "Qwen/Qwen3.5-4B"},
-            ),
-            patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
-            patch.object(main.STATE, "refresh_preflight", return_value=[]),
-            patch.object(main.STATE.workflow, "status", "idle"),
-            patch.object(main, "_remember_lora_dataset_editor") as remember_editor,
-        ):
-            applied = routes["/lora/data/import/apply"](
-                token=token,
-                filename="captain-data.jsonl",
+        try:
+            clear_session_state(session_id)
+            set_ctx(
+                _LCARSContext(
+                    mode=Mode.HANDLE,
+                    session_id=session_id,
+                    active_action_id=main.LORA_DATASET_UPLOAD_ACTION,
+                )
             )
-            saved = Path(temp_dir) / "data" / "captain-data.jsonl"
-            saved_record = json.loads(saved.read_text(encoding="utf-8"))
+            with (
+                patch.object(main.lcars, "update") as update,
+                patch.object(main.lcars, "notify"),
+            ):
+                staged = main._stage_lora_dataset_import(uploaded)
 
-        self.assertIn("DATASET LOADED", applied)
-        self.assertEqual(
-            saved_record["messages"],
-            [
-                {"role": "user", "content": "Status?"},
-                {
-                    "role": "assistant",
-                    "content": "All systems ready. <script>alert('x')</script>",
-                },
-            ],
-        )
-        updates = apply_updates.call_args.args[0]
-        self.assertEqual(updates["datasets.0.path"], "./data/captain-data.jsonl")
-        self.assertEqual(updates["datasets.0.type"], "chat_template")
-        self.assertIsNone(updates["datasets.0.chat_template"])
-        remember_editor.assert_called_once()
-        repeated = routes["/lora/data/import/apply"](
-            token=token,
-            filename="captain-data.jsonl",
-        )
-        self.assertIn("expired or was already used", repeated)
+            self.assertIsNotNone(staged)
+            assert staged is not None
+            self.assertEqual(staged.dataset.detected_format, "ShareGPT conversations")
+            self.assertIn(
+                "<script>alert('x')</script>",
+                staged.dataset.preview_rows[0]["Ideal output"],
+            )
+            self.assertIsInstance(staged.dataset.jsonl_text, str)
+            self.assertNotIsInstance(staged.dataset.jsonl_text, bytes)
+            update.assert_any_call(main.LORA_DATASET_PREVIEW_POPUP_ID, open=True)
+
+            with (
+                TemporaryDirectory() as temp_dir,
+                patch.object(main, "PROJECT_ROOT", Path(temp_dir)),
+                patch.object(
+                    main.STATE.config_store,
+                    "load",
+                    return_value={"base_model": "Qwen/Qwen3.5-4B"},
+                ),
+                patch.object(main.STATE.config_store, "apply_updates") as apply_updates,
+                patch.object(main.STATE, "refresh_preflight", return_value=[]),
+                patch.object(main.STATE.workflow, "status", "idle"),
+                patch.object(main, "_remember_lora_dataset_editor") as remember_editor,
+                patch.object(main, "_update_config_widgets"),
+                patch.object(main, "_update_preflight_widgets"),
+                patch.object(main, "_update_lora_widgets"),
+            ):
+                applied = main._apply_lora_dataset_import("captain-data.jsonl")
+                saved = Path(temp_dir) / "data" / "captain-data.jsonl"
+                saved_record = json.loads(saved.read_text(encoding="utf-8"))
+
+            self.assertIsNone(applied)
+            self.assertEqual(
+                saved_record["messages"],
+                [
+                    {"role": "user", "content": "Status?"},
+                    {
+                        "role": "assistant",
+                        "content": "All systems ready. <script>alert('x')</script>",
+                    },
+                ],
+            )
+            updates = apply_updates.call_args.args[0]
+            self.assertEqual(updates["datasets.0.path"], "./data/captain-data.jsonl")
+            self.assertEqual(updates["datasets.0.type"], "chat_template")
+            self.assertIsNone(updates["datasets.0.chat_template"])
+            remember_editor.assert_called_once()
+
+            with patch.object(main.lcars, "notify") as notify:
+                repeated = main._apply_lora_dataset_import("captain-data.jsonl")
+            self.assertIsNone(repeated)
+            self.assertIn("expired", notify.call_args.args[0])
+        finally:
+            with main.STATE.pending_lora_dataset_lock:
+                main.STATE.pending_lora_dataset = original_pending
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
+
+    def test_native_upload_route_dispatches_without_retaining_request_bytes(self) -> None:
+        original_ctx = get_ctx()
+        session_id = "request-scoped-upload"
+        try:
+            clear_session_state(session_id)
+            app = main.create_lcars_app(main.build_ui)
+            paths = {getattr(route, "path", "") for route in app.router.routes}
+            self.assertIn("/lcars/upload/files", paths)
+            self.assertNotIn("/lora/data/import", paths)
+            self.assertFalse(any(path.startswith("/lora/data/import/") for path in paths))
+            handler = app.state.plugin_action_handlers["*"]
+            payload = {
+                "files": [
+                    {
+                        "name": "training.json",
+                        "size": 2,
+                        "content_type": "application/json",
+                        "data": b"{}",
+                    }
+                ]
+            }
+            with (
+                patch.object(main, "_stage_lora_dataset_import") as stage,
+                patch.object(main, "_persist_widget_state"),
+            ):
+                asyncio.run(
+                    handler(
+                        main.LORA_DATASET_UPLOAD_ACTION,
+                        payload,
+                        session_id,
+                    )
+                )
+
+            stage.assert_called_once()
+            self.assertNotIn("files", get_session_state(session_id))
+        finally:
+            clear_session_state(session_id)
+            set_ctx(original_ctx)
 
     def test_saving_data_preserves_known_models_top_level_chat_template(self) -> None:
         report = main.DatasetReport(
@@ -565,9 +631,7 @@ class V44UiTests(unittest.TestCase):
             display_rows = main._lora_dataset_download_rows(cache_rows, "")
 
         self.assertEqual([row["Repo"] for row in ready_rows], ["example/ready"])
-        incomplete = next(
-            row for row in display_rows if row["Dataset"] == "nvidia/incomplete"
-        )
+        incomplete = next(row for row in display_rows if row["Dataset"] == "nvidia/incomplete")
         self.assertEqual(incomplete["Status"], "INCOMPLETE")
         self.assertIn("Download this dataset again", incomplete["What to do"])
         notice = main._lora_dataset_cache_notice(cache_rows, ready_rows)
@@ -663,17 +727,20 @@ class V44UiTests(unittest.TestCase):
         hub = self.manifest.pages["hub"]
         self.assertEqual(hub.archetype, "telemetry")
         self.assertFalse(hub.fillers)
+        self.assertEqual(hub.sizing, "fill")
         results_panel = self.widgets["hf-results-panel"]
         self.assertEqual(results_panel.zone, "primary")
         self.assertEqual(results_panel.weight, 12)
         self.assertEqual(results_panel.aspect, "wide")
         self.assertEqual(results_panel.group, "hf-browser")
+        self.assertEqual(results_panel.sizing, "fill")
         self.assertIsNone(results_panel.span)
         self.assertFalse(results_panel.options.collapsible)
         operations_panel = self.widgets["hf-operations-panel"]
         self.assertEqual(operations_panel.zone, "primary")
         self.assertEqual(operations_panel.aspect, "wide")
         self.assertEqual(operations_panel.group, "hf-browser")
+        self.assertEqual(operations_panel.sizing, "content")
         self.assertFalse(operations_panel.options.collapsible)
         self.assertNotIn("hf-search-panel", self.widgets)
         self.assertNotIn("hf-filter-panel", self.widgets)
@@ -704,6 +771,7 @@ class V44UiTests(unittest.TestCase):
         self.assertTrue(results.options.expandable)
         self.assertTrue(results.options.sticky_header)
         self.assertEqual(results.options.data_mode, "server")
+        self.assertEqual(results.options.sort_cycle, "two-state")
         self.assertTrue(results.options.emit_state_changes)
         self.assertTrue(results.options.row_click_select)
         self.assertEqual(results.options.selection.mode, "single")
@@ -749,9 +817,14 @@ class V44UiTests(unittest.TestCase):
             },
         )
         refine = self.widgets["hf-refine-results"]
-        self.assertEqual(refine.hint.title, "Advanced Result Filters")
-        self.assertEqual(refine.hint.trigger, ["click", "press"])
-        self.assertIn(filter_form, refine.hint.children)
+        self.assertTrue(refine.hint.text)
+        filter_popup = self.widgets["hf-filter-popup"]
+        self.assertEqual(filter_popup.type, "popup")
+        self.assertFalse(filter_popup.open)
+        self.assertFalse(filter_popup.modal)
+        self.assertTrue(filter_popup.draggable)
+        self.assertTrue(filter_popup.resizable)
+        self.assertIn(filter_form, filter_popup.children)
         self.assertTrue(self.widgets["hf-query"].hint.text)
         self.assertTrue(self.widgets["hf-selection-status"].hint.children)
         self.assertIn("ACTIVE FILTERS", self.widgets["hf-filter-summary"].content)
@@ -1516,7 +1589,7 @@ class V44UiTests(unittest.TestCase):
             ["charlie/model", "bravo/model", "alpha/model"],
         )
 
-    def test_hf_cleared_client_sort_toggles_the_server_direction(self) -> None:
+    def test_hf_stale_cleared_sort_restores_canonical_server_state(self) -> None:
         original_ctx = get_ctx()
         original_sort = main.STATE.hf.local_sort
         original_descending = main.STATE.hf.local_sort_desc
@@ -1541,10 +1614,14 @@ class V44UiTests(unittest.TestCase):
                     },
                 )
             )
-            with patch.object(main, "_hf_sort_action") as sort:
+            with (
+                patch.object(main, "_hf_sort_action") as sort,
+                patch.object(main, "_update_hf_widgets") as update,
+            ):
                 main._handle_hf_table_action()
 
-            sort.assert_called_once_with("files", descending=True)
+            sort.assert_not_called()
+            update.assert_called_once_with()
         finally:
             clear_session_state(session_id)
             set_ctx(original_ctx)
@@ -1617,8 +1694,7 @@ class V44UiTests(unittest.TestCase):
         original_expanded = list(main.STATE.hf.expanded_result_ids)
         session_id = "table-cached-page"
         results = [
-            SearchResult(repo_id=f"example/model-{index}", repo_type="model")
-            for index in range(30)
+            SearchResult(repo_id=f"example/model-{index}", repo_type="model") for index in range(30)
         ]
         try:
             clear_session_state(session_id)
